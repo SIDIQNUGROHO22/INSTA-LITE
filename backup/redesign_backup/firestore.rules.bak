@@ -1,0 +1,127 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper function: cek apakah pengguna telah login
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper function: cek kepemilikan dokumen pengguna
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // ==========================================
+    // KOLEKSI: users
+    // Dokumen profil pengguna (/users/{uid})
+    // ==========================================
+    match /users/{uid} {
+      // Pengguna hanya boleh membaca profil miliknya sendiri
+      allow read: if isOwner(uid);
+
+      // Pembuatan profil awal:
+      // - Hanya untuk UID sendiri
+      // - Wajib memiliki semua field: email, username, bio, createdAt (tanpa field tambahan)
+      // - Email wajib sama persis dengan email akun autentikasi Firebase
+      // - Username 3–30 karakter (huruf, angka, titik, underscore)
+      // - Bio maksimal 500 karakter
+      // - createdAt wajib sesuai request.time
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasAll(['email', 'username', 'bio', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['email', 'username', 'bio', 'createdAt'])
+        && request.resource.data.email is string
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.bio is string
+        && request.resource.data.bio.size() <= 500
+        && request.resource.data.createdAt == request.time;
+
+      // Pembaruan profil:
+      // - Hanya boleh mengubah field username dan bio
+      // - Email dan createdAt tidak boleh diganti melalui update
+      // - Username dan bio divalidasi format dan panjangnya
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['username', 'bio'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.bio is string
+        && request.resource.data.bio.size() <= 500
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.createdAt == resource.data.createdAt;
+
+      // Penghapusan profil: hanya boleh dilakukan pemilik akun
+      allow delete: if isOwner(uid);
+    }
+
+    // ==========================================
+    // KOLEKSI: posts
+    // Dokumen postingan feed (/posts/{postId})
+    // ==========================================
+    match /posts/{postId} {
+      // Read hanya untuk pengguna yang sudah login (mendukung query feed & query postingan pemilik)
+      allow read: if isAuthenticated();
+
+      // Pembuatan postingan:
+      // - Create hanya untuk UID sendiri
+      // - Wajib memiliki semua field: uid, username, caption, mediaUrl, mediaPath, mediaPublicId, mediaType, createdAt
+      // - Tidak boleh ada field tambahan
+      // - Username wajib string, sesuai regex ^[a-zA-Z0-9_.]{3,30}$, dan sama dengan username profil pembuat
+      // - Caption string maksimal 2200 karakter
+      // - mediaUrl, mediaPath, mediaPublicId wajib bertipe string
+      // - mediaType hanya 'text', 'image', atau 'video'
+      // - Postingan text: mediaUrl, mediaPath, mediaPublicId wajib string kosong
+      // - Postingan image: wajib URL HTTPS Cloudinary berformat image, mediaPublicId string 1-200 karakter, mediaPath string kosong
+      // - Postingan video: wajib URL HTTPS Cloudinary berformat video, mediaPublicId string 1-200 karakter, mediaPath string kosong
+      // - createdAt wajib sesuai request.time
+      allow create: if isAuthenticated()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasAll(['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username
+        && request.resource.data.caption is string
+        && request.resource.data.caption.size() <= 2200
+        && request.resource.data.mediaUrl is string
+        && request.resource.data.mediaPath is string
+        && request.resource.data.mediaPublicId is string
+        && request.resource.data.mediaType in ['text', 'image', 'video']
+        && (
+          request.resource.data.mediaType == 'text'
+            ? (request.resource.data.mediaUrl == '' && request.resource.data.mediaPath == '' && request.resource.data.mediaPublicId == '')
+            : (request.resource.data.mediaType == 'image'
+                ? (request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/.*/image/upload/.*')
+                    && request.resource.data.mediaPublicId.size() > 0
+                    && request.resource.data.mediaPublicId.size() <= 200
+                    && request.resource.data.mediaPath == '')
+                : (request.resource.data.mediaType == 'video'
+                    && request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/.*/video/upload/.*')
+                    && request.resource.data.mediaPublicId.size() > 0
+                    && request.resource.data.mediaPublicId.size() <= 200
+                    && request.resource.data.mediaPath == '')
+              )
+        )
+        && request.resource.data.createdAt == request.time;
+
+      // Pembaruan postingan:
+      // - Hanya boleh mengubah username oleh pemilik postingan
+      // - Username bertipe string dan sesuai regex ^[a-zA-Z0-9_.]{3,30}$
+      // - Username baru wajib sama dengan username profil pemilik yang sudah diperbarui di Firestore
+      // - UID dan field lainnya tidak boleh berubah
+      // - Kompatibel dengan urutan kode aplikasi: update profil dahulu, lalu batch update postingan
+      allow update: if isAuthenticated()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['username'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username
+        && request.resource.data.uid == resource.data.uid;
+
+      // Penghapusan postingan: hanya oleh pemilik postingan
+      allow delete: if isAuthenticated()
+        && resource.data.uid == request.auth.uid;
+    }
+  }
+}

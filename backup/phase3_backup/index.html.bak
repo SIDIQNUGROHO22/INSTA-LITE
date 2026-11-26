@@ -1,0 +1,105 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#ffffff">
+  <title>InstaLite — Share Your Moments</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="navbar">
+    <a class="brand" href="#" aria-label="InstaLite">InstaLite</a>
+    <span class="tagline">Share your moments.</span>
+  </header>
+
+  <main class="container">
+    <section id="authSection" class="panel">
+      <h1 id="authTitle">Selamat datang</h1>
+      <p id="authSubtitle" class="muted">Masuk atau buat akun InstaLite.</p>
+
+      <form id="authForm">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email"
+          placeholder="nama@email.com" required>
+
+        <label for="password">Kata sandi</label>
+        <input id="password" type="password"
+          autocomplete="current-password" minlength="6"
+          placeholder="Minimal 6 karakter" required>
+
+        <button id="authSubmit" type="submit">Masuk</button>
+      </form>
+
+      <button id="toggleAuth" class="text-button" type="button">
+        Belum punya akun? Daftar
+      </button>
+    </section>
+
+    <section id="appSection" hidden>
+      <section class="panel profile">
+        <div>
+          <p class="eyebrow">PROFIL SAYA</p>
+          <h2 id="profileUsername">Pengguna</h2>
+          <p id="profileEmail" class="muted"></p>
+        </div>
+
+        <form id="profileForm" class="profile-form">
+          <label for="username">Username</label>
+          <input id="username" maxlength="30" required>
+
+          <label for="bio">Bio</label>
+          <textarea id="bio" maxlength="160"
+            placeholder="Ceritakan sedikit tentang dirimu"></textarea>
+
+          <button type="submit">Simpan profil</button>
+        </form>
+
+        <div class="profile-actions">
+          <button id="logoutButton" class="secondary" type="button">
+            Keluar
+          </button>
+          <button id="deleteAccountButton" class="danger" type="button">
+            Hapus akun
+          </button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Buat postingan</h2>
+        <form id="postForm">
+          <label for="mediaFile">Foto atau video (opsional)</label>
+          <input id="mediaFile" type="file"
+            accept="image/jpeg,image/png,video/mp4,video/quicktime">
+          <p class="hint">JPG/PNG maksimal 10 MB atau MP4/MOV maksimal 50 MB. Kosongkan jika hanya ingin membuat postingan teks.</p>
+
+          <label for="caption">Caption</label>
+          <textarea id="caption" maxlength="2200"
+            placeholder="Apa yang ingin kamu bagikan?"></textarea>
+
+          <button id="uploadButton" type="submit">Unggah postingan</button>
+        </form>
+      </section>
+
+      <section class="feed-section">
+        <div class="feed-heading">
+          <h2>Feed</h2>
+          <span class="muted">Postingan terbaru</span>
+        </div>
+        <div id="feed" class="feed">
+          <p class="muted">Memuat postingan...</p>
+        </div>
+      </section>
+    </section>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+  </main>
+
+  <footer>
+    <p>InstaLite</p>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

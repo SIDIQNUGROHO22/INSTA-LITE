@@ -1,0 +1,261 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: Cek apakah pengguna telah login
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper: Cek apakah pengguna adalah pemilik dokumen
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // ==========================================
+    // KOLEKSI: users (/users/{uid})
+    // ==========================================
+    match /users/{uid} {
+      // Pengguna yang sudah login boleh membaca profil pengguna lain (untuk cek username unik & profil feed)
+      allow read: if isAuthenticated();
+
+      // Pembuatan profil awal:
+      // - Hanya boleh untuk UID sendiri saat registrasi
+      // - Wajib memiliki field: email, username, bio, createdAt
+      // - Opsional field: photoURL, photoPublicId
+      // - Email harus sama dengan email autentikasi Firebase
+      // - Username 3–30 karakter (huruf, angka, titik, underscore)
+      // - Bio maksimal 500 karakter
+      // - createdAt wajib bertipe timestamp
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasAll(['email', 'username', 'bio', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['email', 'username', 'bio', 'createdAt', 'photoURL', 'photoPublicId'])
+        && request.resource.data.email is string
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.bio is string
+        && request.resource.data.bio.size() <= 500
+        && (!('photoURL' in request.resource.data) || (request.resource.data.photoURL is string && request.resource.data.photoURL.size() <= 1000))
+        && (!('photoPublicId' in request.resource.data) || (request.resource.data.photoPublicId is string && request.resource.data.photoPublicId.size() <= 200))
+        && request.resource.data.createdAt is timestamp;
+
+      // Pembaruan profil:
+      // - Hanya boleh mengubah field username, bio, photoURL, dan photoPublicId oleh pemilik akun
+      // - Field email, createdAt, dan UID tidak boleh diganti
+      // - Format username, bio, dan photo tetap divalidasi ketat
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['username', 'bio', 'photoURL', 'photoPublicId'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.bio is string
+        && request.resource.data.bio.size() <= 500
+        && (!('photoURL' in request.resource.data) || (request.resource.data.photoURL is string && request.resource.data.photoURL.size() <= 1000))
+        && (!('photoPublicId' in request.resource.data) || (request.resource.data.photoPublicId is string && request.resource.data.photoPublicId.size() <= 200));
+
+      // Penghapusan profil: hanya boleh dilakukan pemilik akun sendiri
+      allow delete: if isOwner(uid);
+
+      // ==========================================
+      // SUBKOLEKSI: bookmarks (/users/{uid}/bookmarks/{postId})
+      // ==========================================
+      match /bookmarks/{postId} {
+        // Hanya pemilik akun yang dapat membaca bookmark pribadinya
+        allow read: if isOwner(uid);
+
+        // Menambah atau memperbarui bookmark: hanya pemilik akun, wajib menyimpan postId dan createdAt
+        allow create, update: if isOwner(uid)
+          && request.resource.data.keys().hasAll(['postId', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['postId', 'createdAt'])
+          && request.resource.data.postId is string
+          && request.resource.data.postId == postId
+          && request.resource.data.createdAt is timestamp;
+
+        // Membatalkan bookmark: hanya pemilik akun
+        allow delete: if isOwner(uid);
+      }
+
+      // ==========================================
+      // SUBKOLEKSI: hiddenPosts (/users/{uid}/hiddenPosts/{postId})
+      // ==========================================
+      match /hiddenPosts/{postId} {
+        // Hanya pemilik akun yang dapat membaca daftar postingan disembunyikan pribadinya
+        allow read: if isOwner(uid);
+
+        // Menyembunyikan atau memperbarui postingan tersembunyi: hanya pemilik akun
+        allow create, update: if isOwner(uid)
+          && request.resource.data.keys().hasAll(['postId', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['postId', 'createdAt'])
+          && request.resource.data.postId is string
+          && request.resource.data.postId == postId
+          && request.resource.data.createdAt is timestamp;
+
+        // Mengembalikan postingan yang disembunyikan: hanya pemilik akun
+        allow delete: if isOwner(uid);
+      }
+    }
+
+    // ==========================================
+    // KOLEKSI: posts (/posts/{postId})
+    // ==========================================
+    match /posts/{postId} {
+      // Pengguna yang sudah login boleh membaca seluruh postingan feed
+      allow read: if isAuthenticated();
+
+      // Pembuatan postingan:
+      // - Hanya untuk UID sendiri
+      // - Wajib memiliki semua field: uid, username, caption, mediaUrl, mediaPath, mediaPublicId, mediaType, createdAt
+      // - Tidak boleh ada field tambahan
+      // - Username postingan wajib sama dengan username profil pembuatnya di Firestore
+      // - Caption string maksimal 2200 karakter
+      // - mediaUrl, mediaPath, mediaPublicId wajib bertipe string
+      // - mediaType hanya 'text', 'image', atau 'video'
+      // - Postingan text: mediaUrl, mediaPath, mediaPublicId wajib string kosong
+      // - Postingan image: wajib URL HTTPS Cloudinary berformat image, mediaPublicId 1-200 karakter, mediaPath string kosong
+      // - Postingan video: wajib URL HTTPS Cloudinary berformat video, mediaPublicId 1-200 karakter, mediaPath string kosong
+      // - createdAt wajib bertipe timestamp
+      allow create: if isAuthenticated()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasAll(['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username
+        && request.resource.data.caption is string
+        && request.resource.data.caption.size() <= 2200
+        && request.resource.data.mediaUrl is string
+        && request.resource.data.mediaPath is string
+        && request.resource.data.mediaPublicId is string
+        && request.resource.data.mediaType in ['text', 'image', 'video']
+        && (
+          request.resource.data.mediaType == 'text'
+            ? (request.resource.data.mediaUrl == '' && request.resource.data.mediaPath == '' && request.resource.data.mediaPublicId == '')
+            : (request.resource.data.mediaType == 'image'
+                ? (request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/.*/image/upload/.*')
+                    && request.resource.data.mediaPublicId.size() > 0
+                    && request.resource.data.mediaPublicId.size() <= 200
+                    && request.resource.data.mediaPath == '')
+                : (request.resource.data.mediaType == 'video'
+                    && request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/.*/video/upload/.*')
+                    && request.resource.data.mediaPublicId.size() > 0
+                    && request.resource.data.mediaPublicId.size() <= 200
+                    && request.resource.data.mediaPath == '')
+              )
+        )
+        && request.resource.data.createdAt is timestamp;
+
+      // Pembaruan postingan:
+      // - Hanya boleh mengubah field username oleh pemilik postingan
+      // - Username baru wajib sama dengan username profil pemilik yang sudah diperbarui di Firestore
+      // - UID dan field lainnya tidak boleh berubah
+      // - Sesuai dengan alur aplikasi: update profil dahulu, lalu batch update postingan
+      allow update: if isAuthenticated()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['username'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+        && request.resource.data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username
+        && request.resource.data.uid == resource.data.uid;
+
+      // Penghapusan postingan: hanya oleh pemilik postingan
+      allow delete: if isAuthenticated()
+        && resource.data.uid == request.auth.uid;
+
+      // ==========================================
+      // SUBKOLEKSI: likes (/posts/{postId}/likes/{uid})
+      // ==========================================
+      match /likes/{uid} {
+        // Setiap pengguna terautentikasi dapat melihat status Like
+        allow read: if isAuthenticated();
+
+        // Memberikan Like:
+        // - Hanya boleh menggunakan ID dokumen sama dengan UID pengirim (mencegah like ganda)
+        // - Mengizinkan create & update (upsert aman via setDoc)
+        // - Wajib menyertakan uid dan createdAt bertipe timestamp
+        allow create, update: if isOwner(uid)
+          && request.resource.data.keys().hasAll(['uid', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.createdAt is timestamp;
+
+        // Membatalkan Like: hanya pemilik Like yang bersangkutan
+        allow delete: if isOwner(uid);
+      }
+
+      // ==========================================
+      // SUBKOLEKSI: comments (/posts/{postId}/comments/{commentId})
+      // ==========================================
+      match /comments/{commentId} {
+        // Setiap pengguna terautentikasi dapat membaca komentar pada postingan
+        allow read: if isAuthenticated();
+
+        // Menambahkan atau memperbarui komentar:
+        // - Pengguna terautentikasi
+        // - UID komentar wajib milik pengirim
+        // - Field wajib: uid, username, photoURL, text, createdAt
+        // - Teks komentar minimal 1 karakter dan maksimal 500 karakter
+        // - photoURL string hingga 1000 karakter
+        // - createdAt bertipe timestamp
+        allow create, update: if isAuthenticated()
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.keys().hasAll(['uid', 'username', 'photoURL', 'text', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['uid', 'username', 'photoURL', 'text', 'createdAt'])
+          && request.resource.data.username is string
+          && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
+          && request.resource.data.photoURL is string
+          && request.resource.data.photoURL.size() <= 1000
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500
+          && request.resource.data.createdAt is timestamp;
+
+        // Menghapus komentar: hanya pemilik komentar yang bersangkutan
+        allow delete: if isAuthenticated()
+          && resource.data.uid == request.auth.uid;
+      }
+    }
+
+    // ==========================================
+    // KOLEKSI: notifications (/notifications/{notificationId})
+    // ==========================================
+    match /notifications/{notificationId} {
+      // Pengguna hanya boleh membaca notifikasi miliknya sendiri (sebagai penerima)
+      allow read: if isAuthenticated()
+        && resource.data.recipientUid == request.auth.uid;
+
+      // Pembuatan notifikasi:
+      // - Pengirim harus pengguna terautentikasi (senderUid == request.auth.uid)
+      // - Tidak boleh mengirim notifikasi ke diri sendiri (recipientUid != request.auth.uid)
+      // - Status read wajib bernilai false saat dibuat
+      // - Jenis notifikasi valid: 'like', 'comment', 'mention'
+      // - Teks pesan maksimal 500 karakter
+      // - createdAt bertipe timestamp
+      allow create: if isAuthenticated()
+        && request.resource.data.senderUid == request.auth.uid
+        && request.resource.data.recipientUid != request.auth.uid
+        && request.resource.data.keys().hasAll(['recipientUid', 'senderUid', 'senderUsername', 'type', 'postId', 'commentId', 'message', 'read', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['recipientUid', 'senderUid', 'senderUsername', 'type', 'postId', 'commentId', 'message', 'read', 'createdAt'])
+        && request.resource.data.recipientUid is string
+        && request.resource.data.senderUsername is string
+        && request.resource.data.type in ['like', 'comment', 'mention']
+        && request.resource.data.postId is string
+        && request.resource.data.commentId is string
+        && request.resource.data.message is string
+        && request.resource.data.message.size() <= 500
+        && request.resource.data.read == false
+        && request.resource.data.createdAt is timestamp;
+
+      // Memperbarui notifikasi (menandai sudah dibaca):
+      // - Hanya penerima notifikasi yang berhak mengubah
+      // - Hanya field 'read' yang boleh diperbarui
+      allow update: if isAuthenticated()
+        && resource.data.recipientUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+        && request.resource.data.read is bool;
+
+      // Menghapus notifikasi: hanya oleh penerima notifikasi
+      allow delete: if isAuthenticated()
+        && resource.data.recipientUid == request.auth.uid;
+    }
+  }
+}

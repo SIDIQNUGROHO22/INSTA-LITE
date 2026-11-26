@@ -1,0 +1,667 @@
+import { auth, db, storage, CLOUDINARY_CONFIG } from "./firebase.js";
+
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  onAuthStateChanged,
+  signOut,
+  deleteUser
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-auth.js";
+
+import {
+  doc, getDoc, setDoc, updateDoc, deleteDoc,
+  collection, query, orderBy, onSnapshot,
+  where, getDocs, serverTimestamp, writeBatch
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-firestore.js";
+
+import {
+  ref, deleteObject
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-storage.js";
+
+const $ = id => document.getElementById(id);
+
+let currentUser = null;
+let isRegister = false;
+let unsubscribeFeed = null;
+
+// Batasan format, ekstensi, dan ukuran file media
+const ALLOWED_MEDIA = {
+  images: {
+    extensions: [".jpg", ".jpeg", ".png"],
+    mimeTypes: ["image/jpeg", "image/png"],
+    maxSize: 10 * 1024 * 1024,
+    label: "JPG/PNG (maksimal 10 MB)"
+  },
+  videos: {
+    extensions: [".mp4", ".mov"],
+    mimeTypes: ["video/mp4", "video/quicktime"],
+    maxSize: 50 * 1024 * 1024,
+    label: "MP4/MOV (maksimal 50 MB)"
+  }
+};
+
+function status(message) {
+  const statusEl = $("status");
+  if (statusEl) {
+    statusEl.textContent = message;
+  }
+}
+
+function safeText(value) {
+  return String(value ?? "");
+}
+
+function formatDate(value) {
+  if (!value?.toDate) return "Baru saja";
+  return value.toDate().toLocaleString("id-ID");
+}
+
+// Konversi kode error Firebase Authentication ke bahasa Indonesia yang mudah dipahami
+function getAuthErrorMessage(code) {
+  switch (code) {
+    case "auth/email-already-in-use":
+      return "Email ini sudah terdaftar. Silakan langsung masuk atau gunakan email lain.";
+    case "auth/invalid-email":
+      return "Format alamat email tidak valid.";
+    case "auth/user-not-found":
+      return "Akun dengan email ini tidak ditemukan. Silakan daftar terlebih dahulu.";
+    case "auth/wrong-password":
+      return "Kata sandi yang Anda masukkan salah. Silakan coba lagi.";
+    case "auth/invalid-credential":
+      return "Email atau kata sandi tidak sesuai. Periksa kembali akun Anda.";
+    case "auth/weak-password":
+      return "Kata sandi terlalu pendek. Gunakan minimal 6 karakter.";
+    case "auth/too-many-requests":
+      return "Terlalu banyak percobaan gagal. Akses diblokir sementara demi keamanan.";
+    case "auth/network-request-failed":
+      return "Gagal terhubung ke internet. Periksa koneksi jaringan Anda.";
+    case "auth/requires-recent-login":
+      return "Demi alasan keamanan, silakan keluar (logout) lalu masuk kembali sebelum melakukan tindakan ini.";
+    default:
+      return "Terjadi kendala autentikasi. Silakan periksa data Anda dan coba beberapa saat lagi.";
+  }
+}
+
+// Validasi menyeluruh: ekstensi nama file, MIME type, dan ukuran file sebelum upload
+function validateMediaFile(file) {
+  const fileName = file.name || "";
+  const lastDotIndex = fileName.lastIndexOf(".");
+  if (lastDotIndex === -1) {
+    return { valid: false, message: "File tidak memiliki ekstensi. Gunakan file JPG, PNG, MP4, atau MOV." };
+  }
+
+  const ext = fileName.slice(lastDotIndex).toLowerCase();
+  const mime = (file.type || "").toLowerCase();
+
+  const isImageExt = ALLOWED_MEDIA.images.extensions.includes(ext);
+  const isVideoExt = ALLOWED_MEDIA.videos.extensions.includes(ext);
+
+  if (!isImageExt && !isVideoExt) {
+    return { valid: false, message: "Ekstensi file tidak didukung. Gunakan .jpg, .jpeg, .png, .mp4, atau .mov." };
+  }
+
+  if (isImageExt) {
+    if (mime && !ALLOWED_MEDIA.images.mimeTypes.includes(mime)) {
+      return { valid: false, message: "Tipe MIME gambar tidak valid. Gunakan file gambar JPG atau PNG." };
+    }
+    if (file.size > ALLOWED_MEDIA.images.maxSize) {
+      return { valid: false, message: "Ukuran file foto melebihi batas maksimal 10 MB." };
+    }
+    return { valid: true, mediaType: "image" };
+  }
+
+  if (isVideoExt) {
+    if (mime && !ALLOWED_MEDIA.videos.mimeTypes.includes(mime)) {
+      return { valid: false, message: "Tipe MIME video tidak valid. Gunakan file video MP4 atau MOV." };
+    }
+    if (file.size > ALLOWED_MEDIA.videos.maxSize) {
+      return { valid: false, message: "Ukuran file video melebihi batas maksimal 50 MB." };
+    }
+    return { valid: true, mediaType: "video" };
+  }
+
+  return { valid: false, message: "File tidak memenuhi syarat format yang didukung." };
+}
+
+// Fungsi upload ke Cloudinary (Unsigned mode, tanpa API Secret di frontend)
+async function uploadToCloudinary(file) {
+  const { cloudName, uploadPreset } = CLOUDINARY_CONFIG;
+  if (!cloudName || !uploadPreset) {
+    throw new Error("CONFIG_MISSING");
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("upload_preset", uploadPreset);
+
+  const url = `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`;
+  const response = await fetch(url, {
+    method: "POST",
+    body: formData
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData?.error?.message || "Gagal mengunggah media ke Cloudinary.");
+  }
+
+  const data = await response.json();
+  return {
+    secureUrl: data.secure_url,
+    resourceType: data.resource_type === "video" ? "video" : "image",
+    publicId: data.public_id
+  };
+}
+
+// Toggle antara mode Masuk dan mode Daftar
+$("toggleAuth").addEventListener("click", () => {
+  isRegister = !isRegister;
+
+  const authTitle = $("authTitle");
+  const authSubtitle = $("authSubtitle");
+  if (authTitle) {
+    authTitle.textContent = isRegister ? "Daftar Akun Baru" : "Selamat datang";
+  }
+  if (authSubtitle) {
+    authSubtitle.textContent = isRegister
+      ? "Buat akun baru untuk mulai berbagi momen di InstaLite."
+      : "Masuk ke akun InstaLite Anda.";
+  }
+
+  $("authSubmit").textContent = isRegister ? "Daftar" : "Masuk";
+  $("toggleAuth").textContent = isRegister
+    ? "Sudah punya akun? Masuk"
+    : "Belum punya akun? Daftar";
+
+  $("password").autocomplete = isRegister
+    ? "new-password"
+    : "current-password";
+
+  $("password").value = "";
+  status("");
+});
+
+// Submit Form Autentikasi (Satu-satunya tempat pembuatan profil awal saat registrasi)
+$("authForm").addEventListener("submit", async event => {
+  event.preventDefault();
+
+  const email = $("email").value.trim();
+  const password = $("password").value;
+
+  if (!email || !password) {
+    status("Email dan kata sandi wajib diisi.");
+    return;
+  }
+
+  if (password.length < 6) {
+    status("Kata sandi minimal harus 6 karakter.");
+    return;
+  }
+
+  $("authSubmit").disabled = true;
+  status("Sedang memproses...");
+
+  try {
+    if (isRegister) {
+      const result = await createUserWithEmailAndPassword(auth, email, password);
+
+      // Inisialisasi profil dasar di Firestore - satu-satunya tempat pembuatan profil awal
+      try {
+        await setDoc(doc(db, "users", result.user.uid), {
+          email: result.user.email,
+          username: "user_" + result.user.uid.slice(0, 8),
+          bio: "",
+          createdAt: serverTimestamp()
+        });
+      } catch (firestoreError) {
+        console.error("Gagal menginisialisasi profil Firestore:", firestoreError);
+        status("Akun autentikasi berhasil dibuat, tetapi inisialisasi profil di Firestore gagal. Periksa aturan keamanan Firestore.");
+        return;
+      }
+
+      // Tampilkan dashboard setelah profil berhasil tersimpan di Firestore
+      isRegister = false;
+      $("authSection").hidden = true;
+      $("appSection").hidden = false;
+      $("profileEmail").textContent = result.user.email || "";
+      $("profileUsername").textContent = "user_" + result.user.uid.slice(0, 8);
+      $("username").value = "user_" + result.user.uid.slice(0, 8);
+      $("bio").value = "";
+      status("Akun berhasil dibuat. Selamat datang di InstaLite!");
+      loadFeed();
+    } else {
+      await signInWithEmailAndPassword(auth, email, password);
+      status("Berhasil masuk.");
+    }
+  } catch (error) {
+    console.error("Auth error:", error);
+    status(getAuthErrorMessage(error.code));
+  } finally {
+    $("authSubmit").disabled = false;
+  }
+});
+
+// Listener status autentikasi pengguna (HANYA MEMBACA, TIDAK MEMBUAT PROFIL GANDA)
+onAuthStateChanged(auth, async user => {
+  currentUser = user;
+
+  if (unsubscribeFeed) {
+    unsubscribeFeed();
+    unsubscribeFeed = null;
+  }
+
+  if (!user) {
+    // Reset form dan tampilan saat pengguna keluar
+    $("authSection").hidden = false;
+    $("appSection").hidden = true;
+    $("profileEmail").textContent = "";
+    $("profileUsername").textContent = "";
+    $("username").value = "";
+    $("bio").value = "";
+    const feed = $("feed");
+    if (feed) feed.replaceChildren();
+    return;
+  }
+
+  try {
+    const userDocRef = doc(db, "users", user.uid);
+    const snapshot = await getDoc(userDocRef);
+
+    // Jangan membuat profil ganda jika dokumen belum ada
+    if (!snapshot.exists()) {
+      if (isRegister) {
+        // Proses registrasi sedang berjalan di authForm, biarkan authForm yang menangani
+        return;
+      }
+      // Kasus akun login tetapi dokumen profil tidak ditemukan
+      $("authSection").hidden = true;
+      $("appSection").hidden = false;
+      $("profileEmail").textContent = user.email || "";
+      $("profileUsername").textContent = "Profil belum dibuat";
+      $("username").value = "";
+      $("bio").value = "";
+      status("Dokumen profil pengguna tidak ditemukan di Firestore. Periksa aturan keamanan Firestore.");
+      return;
+    }
+
+    const profile = snapshot.data() || {};
+    $("authSection").hidden = true;
+    $("appSection").hidden = false;
+    $("profileEmail").textContent = user.email || "";
+    $("profileUsername").textContent = profile.username || "Pengguna";
+    $("username").value = profile.username || "";
+    $("bio").value = profile.bio || "";
+
+    loadFeed();
+  } catch (error) {
+    console.error("Load profile error:", error);
+    status("Profil tidak dapat dimuat. Pastikan Firestore Security Rules sudah diatur.");
+  }
+});
+
+// Simpan pembaruan profil dan sinkronkan username ke seluruh postingan lama milik pengguna
+$("profileForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!currentUser) return;
+
+  const username = $("username").value.trim();
+  const bio = $("bio").value.trim();
+
+  if (!/^[a-zA-Z0-9_.]{3,30}$/.test(username)) {
+    status("Username harus 3–30 karakter: huruf, angka, titik, atau garis bawah.");
+    return;
+  }
+
+  const submitButton = $("profileForm").querySelector("button[type='submit']");
+  if (submitButton) submitButton.disabled = true;
+  status("Menyimpan pembaruan profil dan menyinkronkan postingan...");
+
+  try {
+    // 1. Ambil seluruh postingan milik pengguna saat ini
+    const userPostsQuery = query(
+      collection(db, "posts"),
+      where("uid", "==", currentUser.uid)
+    );
+    const userPostsSnap = await getDocs(userPostsQuery);
+
+    // 2. Siapkan batch write dengan pembagian maksimal 500 operasi per batch
+    const BATCH_LIMIT = 500;
+    let currentBatch = writeBatch(db);
+    let opCount = 0;
+
+    // Masukkan operasi update dokumen profil
+    currentBatch.update(doc(db, "users", currentUser.uid), {
+      username,
+      bio
+    });
+    opCount++;
+
+    // Masukkan update username pada postingan lama (hanya field username yang diperbarui)
+    for (const postDoc of userPostsSnap.docs) {
+      if (postDoc.data().uid === currentUser.uid) {
+        if (opCount === BATCH_LIMIT) {
+          await currentBatch.commit();
+          currentBatch = writeBatch(db);
+          opCount = 0;
+        }
+        // Jangan mengubah mediaUrl, mediaPath, mediaPublicId, mediaType, atau caption
+        currentBatch.update(postDoc.ref, { username });
+        opCount++;
+      }
+    }
+
+    if (opCount > 0) {
+      await currentBatch.commit();
+    }
+
+    $("profileUsername").textContent = username;
+    const postCount = userPostsSnap.size;
+    status(`Profil berhasil diperbarui${postCount > 0 ? ` dan disinkronkan ke ${postCount} postingan` : ""}.`);
+  } catch (error) {
+    console.error("Update profile error:", error);
+    status("Profil gagal diperbarui. Periksa aturan keamanan Firestore.");
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
+});
+
+// Keluar dari akun
+$("logoutButton").addEventListener("click", async () => {
+  try {
+    await signOut(auth);
+    isRegister = false;
+    const authTitle = $("authTitle");
+    const authSubtitle = $("authSubtitle");
+    if (authTitle) authTitle.textContent = "Selamat datang";
+    if (authSubtitle) authSubtitle.textContent = "Masuk atau buat akun InstaLite.";
+    $("authSubmit").textContent = "Masuk";
+    $("toggleAuth").textContent = "Belum punya akun? Daftar";
+    $("password").autocomplete = "current-password";
+    $("authForm").reset();
+    $("postForm").reset();
+    status("Kamu telah keluar.");
+  } catch (error) {
+    console.error("SignOut error:", error);
+    status("Gagal keluar dari akun.");
+  }
+});
+
+// Buat postingan baru (Teks saja atau dengan Foto/Video Cloudinary)
+$("postForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!currentUser) return;
+
+  const fileInput = $("mediaFile");
+  const file = fileInput.files && fileInput.files[0];
+  const caption = $("caption").value.trim();
+  const button = $("uploadButton");
+
+  if (!file && !caption) {
+    status("Silakan tulis caption atau pilih media untuk diunggah.");
+    return;
+  }
+
+  // Nilai default untuk postingan teks murni
+  let mediaUrl = "";
+  let mediaPath = "";
+  let mediaPublicId = "";
+  let mediaType = "text";
+
+  // Jika pengguna memilih file foto atau video
+  if (file) {
+    // 1. Validasi ekstensi, MIME type, dan ukuran file sebelum upload
+    const validation = validateMediaFile(file);
+    if (!validation.valid) {
+      status(validation.message);
+      return;
+    }
+
+    // 2. Periksa apakah kredensial Cloudinary sudah diisi
+    if (!CLOUDINARY_CONFIG.cloudName || !CLOUDINARY_CONFIG.uploadPreset) {
+      status("Layanan penyimpanan foto/video (Cloudinary) belum dikonfigurasi. Anda dapat mengosongkan pilihan file untuk membuat postingan teks, atau lengkapi CLOUDINARY_CONFIG di firebase.js.");
+      return;
+    }
+
+    button.disabled = true;
+    status("Sedang mengunggah media ke Cloudinary...");
+
+    try {
+      const uploaded = await uploadToCloudinary(file);
+      mediaUrl = uploaded.secureUrl;
+      mediaPublicId = uploaded.publicId || "";
+      mediaPath = ""; // mediaPath dikosongkan (hanya digunakan untuk Firebase Storage lama)
+      mediaType = uploaded.resourceType;
+    } catch (error) {
+      console.error("Upload media error:", error);
+      status(`Gagal mengunggah media: ${error.message}`);
+      button.disabled = false;
+      return;
+    }
+  }
+
+  button.disabled = true;
+  status("Menyimpan postingan ke Firestore...");
+
+  try {
+    const profileSnap = await getDoc(doc(db, "users", currentUser.uid));
+    const profile = profileSnap.data();
+    const postRef = doc(collection(db, "posts"));
+
+    await setDoc(postRef, {
+      uid: currentUser.uid,
+      username: profile?.username || "Pengguna",
+      caption,
+      mediaUrl,
+      mediaPath,
+      mediaPublicId,
+      mediaType,
+      createdAt: serverTimestamp()
+    });
+
+    $("postForm").reset();
+    status(mediaUrl ? "Postingan dengan media berhasil diunggah!" : "Postingan teks berhasil dibuat.");
+  } catch (error) {
+    console.error("Post create error:", error);
+    status("Postingan gagal dibuat. Periksa aturan keamanan Firestore.");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// Menampilkan Feed Postingan secara Real-time
+function loadFeed() {
+  if (unsubscribeFeed) unsubscribeFeed();
+
+  const feed = $("feed");
+  feed.innerHTML = '<p class="muted">Memuat postingan...</p>';
+
+  const feedQuery = query(
+    collection(db, "posts"),
+    orderBy("createdAt", "desc")
+  );
+
+  unsubscribeFeed = onSnapshot(feedQuery, snapshot => {
+    feed.replaceChildren();
+
+    if (snapshot.empty) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "Belum ada postingan. Jadilah yang pertama!";
+      feed.append(empty);
+      return;
+    }
+
+    snapshot.forEach(postSnapshot => {
+      const post = postSnapshot.data();
+      const postId = postSnapshot.id;
+
+      const card = document.createElement("article");
+      card.className = "post";
+
+      const header = document.createElement("div");
+      header.className = "post-header";
+
+      const owner = document.createElement("strong");
+      owner.textContent = safeText(post.username);
+
+      const date = document.createElement("span");
+      date.className = "muted";
+      date.textContent = formatDate(post.createdAt);
+
+      header.append(owner, date);
+      card.append(header);
+
+      // Tampilkan media jika URL tersedia dan valid
+      if (post.mediaUrl && (post.mediaUrl.startsWith("http://") || post.mediaUrl.startsWith("https://"))) {
+        let media = null;
+        if (post.mediaType === "video") {
+          media = document.createElement("video");
+          media.className = "post-media";
+          media.src = post.mediaUrl;
+          media.controls = true;
+          media.preload = "metadata";
+          media.playsInline = true;
+        } else if (post.mediaType === "image") {
+          media = document.createElement("img");
+          media.className = "post-media";
+          media.src = post.mediaUrl;
+          media.alt = "Foto unggahan";
+          media.loading = "lazy";
+        }
+        if (media) {
+          card.append(media);
+        }
+      }
+
+      // Tampilkan caption teks jika ada
+      if (post.caption) {
+        const caption = document.createElement("p");
+        caption.className = "post-caption";
+        caption.textContent = safeText(post.caption);
+        card.append(caption);
+      }
+
+      // Tombol hapus hanya ditampilkan jika postingan dibuat oleh pengguna yang sedang login
+      if (currentUser && post.uid === currentUser.uid) {
+        const actions = document.createElement("div");
+        actions.className = "post-actions";
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger";
+        deleteButton.textContent = "Hapus postingan";
+
+        deleteButton.addEventListener("click", async () => {
+          if (!confirm("Hapus postingan ini secara permanen?")) return;
+
+          deleteButton.disabled = true;
+
+          try {
+            const latest = await getDoc(doc(db, "posts", postId));
+
+            if (!latest.exists() || latest.data().uid !== currentUser.uid) {
+              throw new Error("Akses ditolak: Anda bukan pemilik postingan ini.");
+            }
+
+            const postData = latest.data();
+            await deleteDoc(doc(db, "posts", postId));
+
+            // Jika ada file Firebase Storage lama, coba bersihkan
+            if (postData.mediaPath && !postData.mediaPublicId) {
+              try {
+                await deleteObject(ref(storage, postData.mediaPath));
+              } catch (storageErr) {
+                console.warn("Pembersihan media Firebase Storage lama dilewati:", storageErr);
+              }
+            }
+
+            // Berikan informasi transparan mengenai status penghapusan
+            if (postData.mediaPublicId) {
+              status("Postingan berhasil dihapus dari feed. (Catatan: file media di Cloudinary tetap tersimpan karena penghapusan aset Cloudinary memerlukan API Secret di backend).");
+            } else {
+              status("Postingan berhasil dihapus.");
+            }
+          } catch (error) {
+            console.error("Delete post error:", error);
+            status("Penghapusan gagal. Periksa koneksi dan aturan Firestore.");
+          } finally {
+            deleteButton.disabled = false;
+          }
+        });
+
+        actions.append(deleteButton);
+        card.append(actions);
+      }
+
+      feed.append(card);
+    });
+  }, error => {
+    console.error("Feed listener error:", error);
+    status("Feed gagal dimuat. Periksa aturan keamanan Firestore.");
+  });
+}
+
+// Hapus akun pengguna beserta seluruh data postingan miliknya
+$("deleteAccountButton").addEventListener("click", async () => {
+  if (!currentUser) return;
+
+  const confirmed = confirm(
+    "Hapus akun dan semua postingan Anda? Tindakan ini bersifat permanen dan tidak dapat dibatalkan."
+  );
+
+  if (!confirmed) return;
+
+  const user = currentUser;
+  $("deleteAccountButton").disabled = true;
+  status("Sedang menghapus seluruh data postingan dan akun...");
+
+  try {
+    // 1. Ambil seluruh postingan yang dibuat oleh pengguna saat ini
+    const postsQuery = query(
+      collection(db, "posts"),
+      where("uid", "==", user.uid)
+    );
+
+    const postsSnapshot = await getDocs(postsQuery);
+    let hasCloudinaryMedia = false;
+
+    // 2. Hapus setiap postingan di Firestore
+    for (const item of postsSnapshot.docs) {
+      const post = item.data();
+
+      if (post.mediaPath && !post.mediaPublicId) {
+        try {
+          await deleteObject(ref(storage, post.mediaPath));
+        } catch (storageErr) {
+          console.warn("Storage cleanup notice:", storageErr);
+        }
+      }
+
+      if (post.mediaPublicId) {
+        hasCloudinaryMedia = true;
+      }
+
+      await deleteDoc(item.ref);
+    }
+
+    // 3. Hapus dokumen profil pengguna
+    await deleteDoc(doc(db, "users", user.uid));
+
+    // 4. Hapus akun dari Firebase Authentication
+    await deleteUser(user);
+
+    if (hasCloudinaryMedia) {
+      status("Akun berhasil dihapus dari sistem. (Catatan: file fisik media di Cloudinary tetap tersimpan di akun Cloudinary).");
+    } else {
+      status("Akun berhasil dihapus.");
+    }
+  } catch (error) {
+    console.error("Delete account error:", error);
+    if (error.code === "auth/requires-recent-login") {
+      status("Demi keamanan, silakan keluar lalu masuk kembali sebelum menghapus akun.");
+    } else {
+      status("Penghapusan akun belum selesai. Pastikan sesi login masih baru dan aturan Firestore mengizinkan.");
+    }
+  } finally {
+    $("deleteAccountButton").disabled = false;
+  }
+});

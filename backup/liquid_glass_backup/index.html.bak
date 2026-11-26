@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#4f46e5">
+  <title>InstaLite — Share Your Moments</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Container Notifikasi Toast (Paling Atas Layar) -->
+  <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Header / Navbar Modern -->
+  <header class="navbar">
+    <div class="nav-content">
+      <a class="brand" href="#" aria-label="Beranda InstaLite">
+        <span class="brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
+            <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
+            <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
+          </svg>
+        </span>
+        <span class="brand-text">InstaLite</span>
+      </a>
+
+      <!-- Menu Navigasi Pengguna (Tampil saat Login) -->
+      <nav id="navUserMenu" class="nav-user-menu" hidden>
+        <button id="navCreateBtn" class="nav-btn" type="button" title="Buat Postingan Baru">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span class="nav-btn-text">Posting</span>
+        </button>
+
+        <button id="navProfileBtn" class="nav-btn-pill" type="button" title="Lihat Profil Saya">
+          <span id="navAvatar" class="avatar-mini">U</span>
+          <span id="navUsername" class="nav-username">Pengguna</span>
+        </button>
+
+        <button id="logoutButton" class="nav-btn-icon" type="button" title="Keluar dari Akun">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Konten Utama -->
+  <main class="container">
+
+    <!-- ========================================== -->
+    <!-- 1. PANEL AUTENTIKASI (LOGIN & REGISTER)     -->
+    <!-- ========================================== -->
+    <section id="authSection" class="auth-card">
+      <div class="auth-header">
+        <div class="auth-badge">
+          <span class="dot"></span> Platform Berbagi Momen
+        </div>
+        <h1 id="authTitle">Selamat datang</h1>
+        <p id="authSubtitle" class="auth-desc">Masuk ke akun InstaLite Anda untuk terhubung.</p>
+      </div>
+
+      <!-- Segmented Tab: Masuk vs Daftar -->
+      <div class="auth-tabs" role="tablist">
+        <button id="tabLogin" class="tab-btn active" type="button" role="tab" aria-selected="true">Masuk</button>
+        <button id="tabRegister" class="tab-btn" type="button" role="tab" aria-selected="false">Daftar</button>
+      </div>
+
+      <form id="authForm" class="auth-form" novalidate>
+        <!-- Field Username (Khusus Registrasi) -->
+        <div id="registerUsernameGroup" class="form-group" hidden>
+          <label for="regUsername">Username <span class="required">*</span></label>
+          <div class="input-wrapper">
+            <span class="input-icon">@</span>
+            <input id="regUsername" type="text" placeholder="misal: andi_nugroho" minlength="3" maxlength="30" autocomplete="username">
+          </div>
+          <p class="field-hint">3–30 karakter (huruf, angka, titik, atau garis bawah).</p>
+        </div>
+
+        <!-- Field Email -->
+        <div class="form-group">
+          <label for="email">Alamat Email <span class="required">*</span></label>
+          <div class="input-wrapper">
+            <svg class="input-svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
+              <polyline points="22,6 12,13 2,6"></polyline>
+            </svg>
+            <input id="email" type="email" placeholder="nama@email.com" autocomplete="email" required>
+          </div>
+        </div>
+
+        <!-- Field Password -->
+        <div class="form-group">
+          <div class="label-row">
+            <label for="password">Kata Sandi <span class="required">*</span></label>
+            <button id="togglePasswordVisibility" class="btn-text-link" type="button">Lihat</button>
+          </div>
+          <div class="input-wrapper">
+            <svg class="input-svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+            <input id="password" type="password" placeholder="Minimal 6 karakter" minlength="6" autocomplete="current-password" required>
+          </div>
+        </div>
+
+        <!-- Tombol Submit Form -->
+        <button id="authSubmit" class="btn-primary btn-block" type="submit">
+          <span class="btn-text">Masuk</span>
+          <span class="spinner" hidden></span>
+        </button>
+      </form>
+
+      <!-- Toggle Mode Teks Bawah -->
+      <div class="auth-footer">
+        <button id="toggleAuth" class="btn-text" type="button">
+          Belum punya akun? <strong>Daftar sekarang</strong>
+        </button>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- 2. PANEL APLIKASI (DASHBOARD & FEED)       -->
+    <!-- ========================================== -->
+    <section id="appSection" class="app-section" hidden>
+
+      <!-- KARTU PROFIL PENGGUNA -->
+      <section class="card profile-card">
+        <div class="profile-header">
+          <div id="profileAvatar" class="avatar-large">U</div>
+          <div class="profile-info">
+            <div class="profile-title-row">
+              <h2 id="profileUsername" class="profile-username">Pengguna</h2>
+              <span id="profilePostCountBadge" class="badge-subtle">0 Postingan</span>
+            </div>
+            <p id="profileEmail" class="profile-email">nama@email.com</p>
+            <p id="profileBioText" class="profile-bio-display">Belum ada bio.</p>
+          </div>
+        </div>
+
+        <!-- Tombol Buka Modal Edit Profil & Hapus Akun -->
+        <div class="profile-control-row">
+          <button id="toggleEditProfileBtn" class="btn-outline btn-sm" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 20h9"></path>
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+            </svg>
+            <span>Edit Profil</span>
+          </button>
+
+          <button id="deleteAccountButton" class="btn-danger-outline btn-sm" type="button">
+            Hapus Akun
+          </button>
+        </div>
+      </section>
+
+      <!-- KARTU BUAT POSTINGAN -->
+      <section id="createPostCard" class="card create-post-card">
+        <div class="card-heading">
+          <span class="heading-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </span>
+          <h3>Bagikan Momen</h3>
+        </div>
+
+        <form id="postForm" class="post-form">
+          <!-- Textarea Caption -->
+          <div class="form-group">
+            <div class="label-row">
+              <label for="caption">Tulis Caption</label>
+              <span id="captionCounter" class="counter-text">0/2200</span>
+            </div>
+            <textarea id="caption" maxlength="2200" placeholder="Apa momen menarik hari ini? Ceritakan di sini..."></textarea>
+          </div>
+
+          <!-- Upload Dropzone / File Picker -->
+          <div class="upload-zone">
+            <input id="mediaFile" type="file" accept="image/jpeg,image/png,video/mp4,video/quicktime" class="file-input-hidden">
+            <label for="mediaFile" class="file-input-label">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                <polyline points="21 15 16 10 5 21"></polyline>
+              </svg>
+              <span class="upload-label-main">Pilih Foto atau Video</span>
+              <span class="upload-label-sub">JPG/PNG maks 10 MB • MP4/MOV maks 50 MB (Opsional)</span>
+            </label>
+          </div>
+
+          <!-- Preview Box Sebelum Posting -->
+          <div id="mediaPreviewBox" class="media-preview-box" hidden>
+            <div class="preview-media-container">
+              <img id="mediaPreviewImg" class="preview-media" alt="Preview Foto" hidden>
+              <video id="mediaPreviewVideo" class="preview-media" controls preload="metadata" hidden></video>
+            </div>
+            <div class="preview-info-row">
+              <span id="previewFileName" class="preview-filename">file.jpg</span>
+              <button id="removeMediaBtn" class="btn-text-danger" type="button">Hapus Media</button>
+            </div>
+          </div>
+
+          <!-- Progress Bar Upload Cloudinary -->
+          <div id="uploadProgressBox" class="upload-progress-box" hidden>
+            <div class="progress-bar-bg">
+              <div id="uploadProgressBar" class="progress-bar-fill" style="width: 0%"></div>
+            </div>
+            <span id="uploadProgressText" class="progress-text">Mengunggah media: 0%</span>
+          </div>
+
+          <!-- Tombol Submit Post -->
+          <div class="post-submit-row">
+            <button id="cloudinaryHelpBtn" class="btn-text-subtle" type="button">Panduan Cloudinary</button>
+            <button id="uploadButton" class="btn-primary" type="submit">
+              <span class="btn-text">Posting Sekarang</span>
+              <span class="spinner" hidden></span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- FEED POSTINGAN -->
+      <section class="feed-section">
+        <div class="feed-heading">
+          <div class="feed-title-wrapper">
+            <h2>Feed Terbaru</h2>
+            <span class="live-dot" title="Real-time listener aktif"></span>
+          </div>
+          <span class="muted-text">Momen terkini dari pengguna</span>
+        </div>
+
+        <!-- Skeleton Loading Shimmer saat Memuat Feed -->
+        <div id="feedSkeleton" class="feed-skeleton" hidden>
+          <div class="skeleton-card">
+            <div class="skeleton-header">
+              <div class="skeleton-avatar"></div>
+              <div class="skeleton-lines">
+                <div class="skeleton-line line-short"></div>
+                <div class="skeleton-line line-tiny"></div>
+              </div>
+            </div>
+            <div class="skeleton-media"></div>
+            <div class="skeleton-caption">
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line line-half"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Kontainer Feed Asli -->
+        <div id="feed" class="feed-list"></div>
+
+        <!-- Empty State jika belum ada postingan -->
+        <div id="emptyFeed" class="empty-feed" hidden>
+          <div class="empty-icon-box">
+            <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
+              <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
+              <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
+            </svg>
+          </div>
+          <h4>Belum Ada Postingan</h4>
+          <p>Jadilah orang pertama yang membagikan momen seru kamu di InstaLite!</p>
+        </div>
+      </section>
+    </section>
+
+    <!-- Paragraf status pembantu screen reader -->
+    <p id="status" class="sr-only" role="status" aria-live="polite"></p>
+  </main>
+
+  <!-- ========================================== -->
+  <!-- 3. MODAL POPUP DIALOG                      -->
+  <!-- ========================================== -->
+
+  <!-- Modal Edit Profil -->
+  <div id="editProfileModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="editProfileTitle" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-icon-circle icon-info">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h9"></path>
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+          </svg>
+        </div>
+        <h4 id="editProfileTitle">Edit Profil</h4>
+        <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="editProfileModal">&times;</button>
+      </div>
+      <form id="profileForm">
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="username">Username Baru <span class="required">*</span></label>
+            <input id="username" type="text" maxlength="30" autocomplete="off" required>
+            <p class="field-hint">3–30 karakter. Mengubah username akan otomatis menyinkronkan seluruh postingan Anda.</p>
+          </div>
+
+          <div class="form-group">
+            <div class="label-row">
+              <label for="bio">Bio Profil</label>
+              <span id="bioCounter" class="counter-text">0/500</span>
+            </div>
+            <textarea id="bio" maxlength="500" placeholder="Ceritakan sedikit tentang dirimu..."></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="cancelEditProfileBtn" class="btn-secondary" type="button" data-close-modal="editProfileModal">Batal</button>
+          <button id="saveProfileBtn" class="btn-primary" type="submit">
+            <span class="btn-text">Simpan Perubahan</span>
+            <span class="spinner" hidden></span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal Konfirmasi Logout -->
+  <div id="logoutModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="logoutModalTitle" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-icon-circle icon-info">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+        </div>
+        <h4 id="logoutModalTitle">Keluar dari InstaLite?</h4>
+        <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="logoutModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Kamu harus masuk kembali untuk membuat postingan dan berinteraksi di InstaLite.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelLogoutBtn" class="btn-secondary" type="button" data-close-modal="logoutModal">Batal</button>
+        <button id="confirmLogoutBtn" class="btn-primary" type="button">Ya, Keluar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Konfirmasi Hapus Postingan -->
+  <div id="deletePostModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="deletePostModalTitle" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-icon-circle icon-danger">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+        </div>
+        <h4 id="deletePostModalTitle">Hapus Postingan Ini?</h4>
+        <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="deletePostModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Postingan ini akan dihapus secara permanen dari feed database Firestore. Tindakan ini tidak dapat dibatalkan.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelDeletePostBtn" class="btn-secondary" type="button" data-close-modal="deletePostModal">Batal</button>
+        <button id="confirmDeletePostBtn" class="btn-danger" type="button">
+          <span class="btn-text">Hapus Sekarang</span>
+          <span class="spinner" hidden></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Konfirmasi Hapus Akun -->
+  <div id="deleteAccountModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="deleteAccountModalTitle" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-icon-circle icon-danger">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+            <line x1="12" y1="9" x2="12" y2="13"></line>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+        </div>
+        <h4 id="deleteAccountModalTitle">Hapus Akun Permanen</h4>
+        <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="deleteAccountModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="danger-notice">
+          <strong>Perhatian:</strong> Semua postingan Anda, riwayat profil, dan akun login akan dihapus selamanya dari sistem.
+        </p>
+        <div class="form-group">
+          <label for="deleteAccountPassword">Masukkan Kata Sandi untuk Konfirmasi <span class="required">*</span></label>
+          <input id="deleteAccountPassword" type="password" placeholder="Kata sandi akun Anda" autocomplete="current-password" required>
+          <p class="field-hint">Kata sandi diperlukan untuk verifikasi keamanan sebelum penghapusan data.</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelDeleteAccountBtn" class="btn-secondary" type="button" data-close-modal="deleteAccountModal">Batal</button>
+        <button id="confirmDeleteAccountBtn" class="btn-danger" type="button">
+          <span class="btn-text">Hapus Akun Selamanya</span>
+          <span class="spinner" hidden></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Panduan Konfigurasi Cloudinary -->
+  <div id="cloudinaryGuideModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cloudinaryGuideModalTitle" hidden>
+    <div class="modal-card modal-large">
+      <div class="modal-header">
+        <div class="modal-icon-circle icon-info">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="16" x2="12" y2="12"></line>
+            <line x1="12" y1="8" x2="12.01" y2="8"></line>
+          </svg>
+        </div>
+        <h4 id="cloudinaryGuideModalTitle">Panduan Konfigurasi Media Cloudinary (Gratis)</h4>
+        <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="cloudinaryGuideModal">&times;</button>
+      </div>
+      <div class="modal-body guide-content">
+        <p>Agar fitur upload foto dan video dapat berfungsi tanpa biaya (paket Spark Firebase gratis), ikuti 3 langkah mudah berikut:</p>
+        <ol class="guide-steps">
+          <li>Daftar akun gratis di <a href="https://cloudinary.com" target="_blank" rel="noopener">cloudinary.com</a> (100% gratis, tanpa kartu kredit).</li>
+          <li>Buka <strong>Settings</strong> &gt; tab <strong>Upload</strong> &gt; scroll ke <strong>Upload presets</strong> &gt; klik <strong>Add upload preset</strong>. Ubah <em>Signing Mode</em> menjadi <strong>Unsigned</strong>, lalu simpan.</li>
+          <li>Buka file <code>firebase.js</code> di proyek ini, lalu isi:
+            <pre class="code-preview"><code>export const CLOUDINARY_CONFIG = {
+  cloudName: "nama_cloud_kamu",
+  uploadPreset: "nama_preset_kamu"
+};</code></pre>
+          </li>
+        </ol>
+        <p class="hint">Jika belum dikonfigurasi, Anda tetap dapat membuat postingan teks dengan mengosongkan pilihan foto/video.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="dismissCloudinaryGuideBtn" class="modal-close-btn-bottom btn-primary" type="button" data-close-modal="cloudinaryGuideModal">Mengerti</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer Modern -->
+  <footer class="footer">
+    <div class="footer-content">
+      <p>InstaLite &copy; 2026 — Dibuat untuk pembelajaran Firebase & Cloudinary.</p>
+    </div>
+  </footer>
+
+  <!-- Script Modul Utama -->
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,256 @@
+
+:root {
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  color: #202124;
+  background: #f7f8fc;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button, input, textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: #4f46e5;
+  color: white;
+  font-weight: 600;
+}
+
+button:hover {
+  filter: brightness(.96);
+}
+
+button:disabled {
+  opacity: .6;
+  cursor: wait;
+}
+
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px max(20px, calc((100% - 760px) / 2));
+  background: #ffffffed;
+  border-bottom: 1px solid #e7e8ef;
+}
+
+.brand {
+  color: #4f46e5;
+  font-size: 25px;
+  font-weight: 800;
+  letter-spacing: -1px;
+  text-decoration: none;
+}
+
+.tagline, .muted, .hint {
+  color: #737787;
+  font-size: 14px;
+}
+
+.container {
+  width: min(100% - 32px, 640px);
+  margin: 32px auto;
+}
+
+.panel {
+  margin-bottom: 24px;
+  padding: 24px;
+  background: white;
+  border: 1px solid #e7e8ef;
+  border-radius: 18px;
+  box-shadow: 0 5px 24px #20212408;
+}
+
+h1, h2, p {
+  margin-top: 0;
+}
+
+h1 {
+  font-size: 28px;
+  letter-spacing: -1px;
+}
+
+h2 {
+  font-size: 20px;
+}
+
+label {
+  display: block;
+  margin: 16px 0 7px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+input, textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #dfe1e9;
+  border-radius: 10px;
+  background: #fff;
+  color: inherit;
+}
+
+input:focus, textarea:focus {
+  outline: 2px solid #a5b4fc;
+  border-color: #818cf8;
+}
+
+textarea {
+  min-height: 80px;
+  resize: vertical;
+}
+
+form button[type="submit"] {
+  width: 100%;
+  margin-top: 18px;
+}
+
+.text-button {
+  margin-top: 12px;
+  padding-left: 0;
+  background: transparent;
+  color: #4f46e5;
+}
+
+.secondary {
+  background: #eef0ff;
+  color: #3730a3;
+}
+
+.danger {
+  background: #fff0f0;
+  color: #b42318;
+}
+
+.profile {
+  display: grid;
+  gap: 16px;
+}
+
+.eyebrow {
+  margin-bottom: 8px;
+  color: #4f46e5;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+}
+
+.profile h2 {
+  margin-bottom: 6px;
+}
+
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.hint {
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.feed-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.post {
+  margin-bottom: 20px;
+  overflow: hidden;
+  background: white;
+  border: 1px solid #e7e8ef;
+  border-radius: 16px;
+}
+
+.post-header, .post-caption, .post-actions {
+  padding: 14px 16px;
+}
+
+.post-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.post-header p, .post-caption {
+  margin-bottom: 0;
+  overflow-wrap: anywhere;
+}
+
+.post-media {
+  display: block;
+  width: 100%;
+  max-height: 560px;
+  object-fit: contain;
+  background: #f0f1f5;
+}
+
+.post-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.post-actions button {
+  padding: 9px 12px;
+}
+
+.status {
+  min-height: 24px;
+  color: #3730a3;
+  overflow-wrap: anywhere;
+}
+
+footer {
+  padding: 24px;
+  color: #85899a;
+  text-align: center;
+  font-size: 12px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 480px) {
+  .navbar {
+    padding: 15px 16px;
+  }
+
+  .tagline {
+    font-size: 12px;
+  }
+
+  .container {
+    margin-top: 20px;
+  }
+
+  .panel {
+    padding: 18px;
+    border-radius: 14px;
+  }
+
+  h1 {
+    font-size: 24px;
+  }
+}

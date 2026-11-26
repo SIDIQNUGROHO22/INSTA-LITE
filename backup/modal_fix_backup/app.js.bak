@@ -1,0 +1,1146 @@
+import { auth, db, storage, CLOUDINARY_CONFIG } from "./firebase.js";
+
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  onAuthStateChanged,
+  signOut,
+  deleteUser,
+  EmailAuthProvider,
+  reauthenticateWithCredential
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-auth.js";
+
+import {
+  doc, getDoc, setDoc, updateDoc, deleteDoc,
+  collection, query, orderBy, onSnapshot,
+  where, getDocs, serverTimestamp, writeBatch
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-firestore.js";
+
+import {
+  ref, deleteObject
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-storage.js";
+
+// Helper pemilih elemen DOM
+const $ = id => document.getElementById(id);
+
+// State Aplikasi
+let currentUser = null;
+let currentProfile = null;
+let isRegister = false;
+let isRegistering = false;
+let isSubmittingPost = false;
+let isUpdatingProfile = false;
+let isDeletingAccount = false;
+let unsubscribeFeed = null;
+let postToDeleteId = null;
+let selectedMediaObjectUrl = null;
+
+// Batasan format dan ukuran file media
+const ALLOWED_MEDIA = {
+  images: {
+    extensions: [".jpg", ".jpeg", ".png"],
+    mimeTypes: ["image/jpeg", "image/png"],
+    maxSize: 10 * 1024 * 1024,
+    label: "JPG/JPEG/PNG (maksimal 10 MB)"
+  },
+  videos: {
+    extensions: [".mp4", ".mov"],
+    mimeTypes: ["video/mp4", "video/quicktime"],
+    maxSize: 50 * 1024 * 1024,
+    label: "MP4/MOV (maksimal 50 MB)"
+  }
+};
+
+/* ==========================================================================
+   1. KOMPONEN TOAST NOTIFICATION MODERN (TOP CENTER)
+   ========================================================================== */
+function showToast(message, type = "info", customTitle = "") {
+  const container = $("toastContainer");
+  if (!container) return;
+
+  const defaultTitles = {
+    success: "Berhasil",
+    error: "Terjadi Kesalahan",
+    warning: "Perhatian",
+    info: "Informasi"
+  };
+
+  const icons = {
+    success: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>`,
+    error: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`,
+    warning: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`,
+    info: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`
+  };
+
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `
+    <div class="toast-icon">${icons[type] || icons.info}</div>
+    <div class="toast-content">
+      <h5 class="toast-title">${customTitle || defaultTitles[type] || "Notifikasi"}</h5>
+      <p class="toast-msg">${safeText(message)}</p>
+    </div>
+    <button class="toast-close" type="button" aria-label="Tutup Notifikasi">&times;</button>
+  `;
+
+  const closeBtn = toast.querySelector(".toast-close");
+  const dismiss = () => {
+    toast.classList.add("toast-hiding");
+    setTimeout(() => toast.remove(), 250);
+  };
+
+  closeBtn.addEventListener("click", dismiss);
+  container.append(toast);
+
+  // Auto dismiss setelah 4.5 detik
+  setTimeout(dismiss, 4500);
+
+  // Aksesibilitas
+  const statusEl = $("status");
+  if (statusEl) statusEl.textContent = message;
+}
+
+/* ==========================================================================
+   2. PENGONTROL MODAL DIALOG MODERN
+   ========================================================================== */
+function openModal(modalId) {
+  const modal = $(modalId);
+  if (modal) {
+    modal.hidden = false;
+    document.body.style.overflow = "hidden"; // Kunci scroll latar belakang
+  }
+}
+
+function closeModal(modalId) {
+  const modal = $(modalId);
+  if (modal) {
+    modal.hidden = true;
+    document.body.style.overflow = "";
+  }
+}
+
+// Pasang handler tutup untuk semua tombol close modal dan backdrop
+document.querySelectorAll(".modal-backdrop").forEach(backdrop => {
+  backdrop.addEventListener("click", event => {
+    if (event.target === backdrop) {
+      backdrop.hidden = true;
+      document.body.style.overflow = "";
+    }
+  });
+
+  const closeBtns = backdrop.querySelectorAll(".modal-close-btn, .modal-close-btn-bottom");
+  closeBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      backdrop.hidden = true;
+      document.body.style.overflow = "";
+    });
+  });
+});
+
+// Tutup modal dengan tombol Escape
+window.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    const openModals = document.querySelectorAll(".modal-backdrop:not([hidden])");
+    openModals.forEach(modal => {
+      modal.hidden = true;
+      document.body.style.overflow = "";
+    });
+  }
+});
+
+/* ==========================================================================
+   3. HELPER TEKS, TANGGAL & VALIDASI
+   ========================================================================== */
+function safeText(value) {
+  return String(value ?? "");
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function formatDate(value) {
+  if (!value?.toDate) return "Baru saja";
+  const date = value.toDate();
+  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
+
+  if (diffSec < 60) return "Baru saja";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} mnt lalu`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} jam lalu`;
+  return date.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function getAuthErrorMessage(code) {
+  switch (code) {
+    case "auth/email-already-in-use":
+      return "Alamat email ini sudah terdaftar. Silakan langsung masuk.";
+    case "auth/invalid-email":
+      return "Format alamat email tidak valid.";
+    case "auth/user-not-found":
+      return "Akun dengan email ini tidak ditemukan. Silakan daftar terlebih dahulu.";
+    case "auth/wrong-password":
+      return "Kata sandi yang Anda masukkan salah. Periksa kembali.";
+    case "auth/invalid-credential":
+      return "Email atau kata sandi tidak sesuai. Periksa kembali data Anda.";
+    case "auth/weak-password":
+      return "Kata sandi terlalu pendek. Gunakan minimal 6 karakter.";
+    case "auth/too-many-requests":
+      return "Terlalu banyak percobaan gagal. Akses diblokir sementara demi keamanan.";
+    case "auth/network-request-failed":
+      return "Gagal terhubung ke jaringan. Periksa sambungan internet Anda.";
+    case "auth/requires-recent-login":
+      return "Demi alasan keamanan, silakan keluar lalu masuk kembali.";
+    default:
+      return "Kendala autentikasi: " + (code || "Silakan periksa kembali data Anda.");
+  }
+}
+
+// Validasi lengkap file foto dan video sebelum upload
+function validateMediaFile(file) {
+  const fileName = file.name || "";
+  const lastDot = fileName.lastIndexOf(".");
+  if (lastDot === -1) {
+    return { valid: false, message: "File tidak memiliki ekstensi. Gunakan JPG, PNG, MP4, atau MOV." };
+  }
+
+  const ext = fileName.slice(lastDot).toLowerCase();
+  const mime = (file.type || "").toLowerCase();
+
+  const isImageExt = ALLOWED_MEDIA.images.extensions.includes(ext);
+  const isVideoExt = ALLOWED_MEDIA.videos.extensions.includes(ext);
+
+  if (!isImageExt && !isVideoExt) {
+    return { valid: false, message: "Format tidak didukung. Format yang diizinkan: JPG, PNG, MP4, atau MOV." };
+  }
+
+  if (isImageExt) {
+    if (mime && !ALLOWED_MEDIA.images.mimeTypes.includes(mime)) {
+      return { valid: false, message: "Tipe MIME file gambar tidak valid. Gunakan file JPG atau PNG." };
+    }
+    if (file.size > ALLOWED_MEDIA.images.maxSize) {
+      return { valid: false, message: "Ukuran file foto melebihi batas maksimal 10 MB." };
+    }
+    return { valid: true, mediaType: "image" };
+  }
+
+  if (isVideoExt) {
+    if (mime && !ALLOWED_MEDIA.videos.mimeTypes.includes(mime)) {
+      return { valid: false, message: "Tipe MIME file video tidak valid. Gunakan file video MP4 atau MOV." };
+    }
+    if (file.size > ALLOWED_MEDIA.videos.maxSize) {
+      return { valid: false, message: "Ukuran file video melebihi batas maksimal 50 MB." };
+    }
+    return { valid: true, mediaType: "video" };
+  }
+
+  return { valid: false, message: "File tidak memenuhi syarat." };
+}
+
+/* ==========================================================================
+   4. UPLOAD CLOUDINARY (DENGAN REAL PROGRESS BAR & ENDPOINT KHUSUS)
+   ========================================================================== */
+async function uploadToCloudinary(file, onProgress) {
+  const { cloudName, uploadPreset } = CLOUDINARY_CONFIG;
+  if (!cloudName || !uploadPreset) {
+    throw new Error("CONFIG_MISSING");
+  }
+
+  const isVideo = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4") || file.name.toLowerCase().endsWith(".mov");
+  const resourceType = isVideo ? "video" : "image";
+  const url = `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("upload_preset", uploadPreset);
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = event => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          onProgress(percent);
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          if (!data.secure_url || !data.public_id) {
+            reject(new Error("Respon Cloudinary tidak menyertakan tautan media."));
+            return;
+          }
+          resolve({
+            secureUrl: data.secure_url,
+            publicId: data.public_id,
+            resourceType: resourceType
+          });
+        } else {
+          const msg = data?.error?.message || `HTTP ${xhr.status} ${xhr.statusText}`;
+          reject(new Error(msg));
+        }
+      } catch (err) {
+        reject(new Error("Gagal membaca respon unggahan dari Cloudinary."));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Gagal terhubung ke server Cloudinary. Periksa jaringan Anda."));
+    xhr.send(formData);
+  });
+}
+
+/* ==========================================================================
+   5. SISTEM AUTENTIKASI: TAB SWITCH, VISIBILITY, LOGIN & REGISTER
+   ========================================================================== */
+function setAuthMode(registerMode) {
+  isRegister = registerMode;
+  const tabLogin = $("tabLogin");
+  const tabRegister = $("tabRegister");
+  const regGroup = $("registerUsernameGroup");
+  const authTitle = $("authTitle");
+  const authSubtitle = $("authSubtitle");
+  const submitBtnText = $("authSubmit")?.querySelector(".btn-text");
+  const toggleBtn = $("toggleAuth");
+  const passwordInput = $("password");
+
+  if (isRegister) {
+    tabLogin?.classList.remove("active");
+    tabRegister?.classList.add("active");
+    if (regGroup) regGroup.hidden = false;
+    if (authTitle) authTitle.textContent = "Daftar Akun Baru";
+    if (authSubtitle) authSubtitle.textContent = "Buat akun InstaLite untuk mulai membagikan momen Anda.";
+    if (submitBtnText) submitBtnText.textContent = "Daftar Sekarang";
+    if (toggleBtn) toggleBtn.innerHTML = 'Sudah punya akun? <strong>Masuk di sini</strong>';
+    if (passwordInput) passwordInput.autocomplete = "new-password";
+  } else {
+    tabRegister?.classList.remove("active");
+    tabLogin?.classList.add("active");
+    if (regGroup) regGroup.hidden = true;
+    if (authTitle) authTitle.textContent = "Selamat datang";
+    if (authSubtitle) authSubtitle.textContent = "Masuk ke akun InstaLite Anda untuk terhubung.";
+    if (submitBtnText) submitBtnText.textContent = "Masuk";
+    if (toggleBtn) toggleBtn.innerHTML = 'Belum punya akun? <strong>Daftar sekarang</strong>';
+    if (passwordInput) passwordInput.autocomplete = "current-password";
+  }
+}
+
+$("tabLogin")?.addEventListener("click", () => setAuthMode(false));
+$("tabRegister")?.addEventListener("click", () => setAuthMode(true));
+$("toggleAuth")?.addEventListener("click", () => setAuthMode(!isRegister));
+
+// Tombol intip / sembunyikan kata sandi
+$("togglePasswordVisibility")?.addEventListener("click", () => {
+  const pwd = $("password");
+  const btn = $("togglePasswordVisibility");
+  if (!pwd || !btn) return;
+  if (pwd.type === "password") {
+    pwd.type = "text";
+    btn.textContent = "Sembunyikan";
+  } else {
+    pwd.type = "password";
+    btn.textContent = "Lihat";
+  }
+});
+
+// Submit Form Autentikasi
+$("authForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+
+  const email = $("email").value.trim();
+  const password = $("password").value;
+  const regUsernameInput = $("regUsername");
+  const submitBtn = $("authSubmit");
+  const spinner = submitBtn?.querySelector(".spinner");
+
+  if (!email || !password) {
+    showToast("Email dan kata sandi wajib diisi.", "warning");
+    return;
+  }
+
+  if (password.length < 6) {
+    showToast("Kata sandi minimal harus 6 karakter.", "warning");
+    return;
+  }
+
+  // Tampilkan loading spinner
+  if (submitBtn) submitBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    if (isRegister) {
+      const regUsername = regUsernameInput ? regUsernameInput.value.trim() : "";
+
+      // Validasi format username
+      if (!/^[a-zA-Z0-9_.]{3,30}$/.test(regUsername)) {
+        showToast("Username harus 3–30 karakter: hanya huruf, angka, titik, atau garis bawah.", "warning");
+        if (submitBtn) submitBtn.disabled = false;
+        if (spinner) spinner.hidden = true;
+        return;
+      }
+
+      isRegistering = true;
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const newUser = userCredential.user;
+
+      // Cek apakah username sudah digunakan oleh orang lain
+      try {
+        const usernameQuery = query(collection(db, "users"), where("username", "==", regUsername));
+        const usernameSnap = await getDocs(usernameQuery);
+
+        if (!usernameSnap.empty) {
+          // Username duplikat! Batalkan pendaftaran dan hapus akun auth sementara
+          await deleteUser(newUser).catch(() => {});
+          await signOut(auth).catch(() => {});
+          isRegistering = false;
+          showToast(`Username "${regUsername}" sudah digunakan. Silakan pilih username lain.`, "warning");
+          if (submitBtn) submitBtn.disabled = false;
+          if (spinner) spinner.hidden = true;
+          return;
+        }
+      } catch (checkErr) {
+        console.warn("Pengecekan username unik Firestore dilewati:", checkErr);
+      }
+
+      // Inisialisasi dokumen profil pengguna di Firestore (Single Responsibility)
+      try {
+        await setDoc(doc(db, "users", newUser.uid), {
+          email: newUser.email,
+          username: regUsername,
+          bio: "",
+          createdAt: serverTimestamp()
+        });
+      } catch (firestoreError) {
+        console.error("Gagal menginisialisasi profil Firestore:", firestoreError.code, firestoreError.message, firestoreError);
+        showToast("Akun dibuat, namun profil gagal disimpan di Firestore. Pastikan firestore.rules sudah di-Publish di Firebase Console.", "error");
+        await signOut(auth).catch(() => {});
+        isRegistering = false;
+        if (submitBtn) submitBtn.disabled = false;
+        if (spinner) spinner.hidden = true;
+        return;
+      }
+
+      // Berhasil registrasi
+      isRegistering = false;
+      currentUser = newUser;
+      currentProfile = { username: regUsername, bio: "", email: newUser.email };
+      updateProfileUI(currentProfile);
+      setAuthMode(false);
+      $("authSection").hidden = true;
+      $("appSection").hidden = false;
+      $("navUserMenu").hidden = false;
+      showToast("Selamat datang di InstaLite! Akun Anda berhasil dibuat.", "success");
+      loadFeed();
+    } else {
+      await signInWithEmailAndPassword(auth, email, password);
+      showToast("Berhasil masuk. Selamat datang kembali!", "success");
+    }
+  } catch (error) {
+    console.error("Auth error detail:", error.code, error.message, error);
+    isRegistering = false;
+    showToast(getAuthErrorMessage(error.code), "error");
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+/* ==========================================================================
+   6. LISTENER STATUS AUTENTIKASI PENGGUNA
+   ========================================================================== */
+onAuthStateChanged(auth, async user => {
+  currentUser = user;
+
+  if (unsubscribeFeed) {
+    unsubscribeFeed();
+    unsubscribeFeed = null;
+  }
+
+  if (!user) {
+    currentProfile = null;
+    $("navUserMenu").hidden = true;
+    $("appSection").hidden = true;
+    $("authSection").hidden = false;
+    $("profileUsername").textContent = "Pengguna";
+    $("profileEmail").textContent = "";
+    $("profileBioText").textContent = "";
+    $("feed").replaceChildren();
+    return;
+  }
+
+  // Jika proses pendaftaran sedang berjalan di authForm, biarkan authForm menyelesaikannya
+  if (isRegistering) {
+    return;
+  }
+
+  // Tampilkan Skeleton Shimmer saat membaca profil dan feed
+  const skeleton = $("feedSkeleton");
+  if (skeleton) skeleton.hidden = false;
+
+  try {
+    const userDocRef = doc(db, "users", user.uid);
+    const snapshot = await getDoc(userDocRef);
+
+    if (!snapshot.exists()) {
+      console.warn("Dokumen profil Firestore tidak ditemukan untuk UID:", user.uid);
+      showToast("Dokumen profil Anda tidak ditemukan di Firestore. Silakan hubungi admin atau daftar ulang.", "error");
+      await signOut(auth).catch(() => {});
+      return;
+    }
+
+    currentProfile = snapshot.data();
+    updateProfileUI(currentProfile);
+
+    $("authSection").hidden = true;
+    $("appSection").hidden = false;
+    $("navUserMenu").hidden = false;
+
+    loadFeed();
+  } catch (error) {
+    console.error("Load profile error detail:", error.code, error.message, error);
+    showToast("Gagal memuat profil: " + (error.code ? `[${error.code}] ` : "") + "Pastikan firestore.rules sudah di-Publish di Firebase Console.", "error");
+  } finally {
+    if (skeleton) skeleton.hidden = true;
+  }
+});
+
+function updateProfileUI(profile) {
+  if (!profile) return;
+  const username = profile.username || "Pengguna";
+  const initial = username.charAt(0).toUpperCase();
+
+  $("profileUsername").textContent = username;
+  $("profileEmail").textContent = currentUser?.email || profile.email || "";
+  $("profileBioText").textContent = profile.bio || "Belum ada bio.";
+  $("username").value = username;
+  $("bio").value = profile.bio || "";
+  $("bioCounter").textContent = `${(profile.bio || "").length}/500`;
+
+  // Avatar dan Navbar
+  $("profileAvatar").textContent = initial;
+  $("navAvatar").textContent = initial;
+  $("navUsername").textContent = username;
+}
+
+/* ==========================================================================
+   7. FORM EDIT PROFIL & SINKRONISASI BATCH USERNAME
+   ========================================================================== */
+$("toggleEditProfileBtn")?.addEventListener("click", () => {
+  const form = $("profileForm");
+  if (!form) return;
+  form.hidden = !form.hidden;
+  if (!form.hidden) {
+    $("username")?.focus();
+  }
+});
+
+$("cancelEditProfileBtn")?.addEventListener("click", () => {
+  const form = $("profileForm");
+  if (form) form.hidden = true;
+});
+
+// Live character counter untuk bio
+$("bio")?.addEventListener("input", event => {
+  const counter = $("bioCounter");
+  if (counter) counter.textContent = `${event.target.value.length}/500`;
+});
+
+$("profileForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!currentUser || isUpdatingProfile) return;
+
+  const newUsername = $("username").value.trim();
+  const newBio = $("bio").value.trim();
+  const saveBtn = $("saveProfileBtn");
+  const spinner = saveBtn?.querySelector(".spinner");
+
+  if (!/^[a-zA-Z0-9_.]{3,30}$/.test(newUsername)) {
+    showToast("Username harus 3–30 karakter: hanya huruf, angka, titik, atau garis bawah.", "warning");
+    return;
+  }
+
+  if (newBio.length > 500) {
+    showToast("Bio maksimal 500 karakter.", "warning");
+    return;
+  }
+
+  isUpdatingProfile = true;
+  if (saveBtn) saveBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    // 1. Jika username berubah, periksa apakah username baru sudah dipakai pengguna lain
+    if (newUsername !== currentProfile?.username) {
+      try {
+        const dupQuery = query(collection(db, "users"), where("username", "==", newUsername));
+        const dupSnap = await getDocs(dupQuery);
+        if (!dupSnap.empty && dupSnap.docs.some(d => d.id !== currentUser.uid)) {
+          showToast(`Username "${newUsername}" sudah digunakan oleh orang lain.`, "warning");
+          isUpdatingProfile = false;
+          if (saveBtn) saveBtn.disabled = false;
+          if (spinner) spinner.hidden = true;
+          return;
+        }
+      } catch (dupErr) {
+        console.warn("Pengecekan username unik dilewati:", dupErr);
+      }
+    }
+
+    // 2. TAHAP 1: Perbarui dokumen profil pengguna terlebih dahulu
+    // Ini krusial agar aturan Security Rules posts (yang memeriksa username di dokumen profil) lolos
+    await updateDoc(doc(db, "users", currentUser.uid), {
+      username: newUsername,
+      bio: newBio
+    });
+
+    // Perbarui state lokal profil
+    currentProfile.username = newUsername;
+    currentProfile.bio = newBio;
+    updateProfileUI(currentProfile);
+
+    // 3. TAHAP 2: Ambil seluruh postingan milik pengguna saat ini dan sinkronkan nama
+    const userPostsQuery = query(
+      collection(db, "posts"),
+      where("uid", "==", currentUser.uid)
+    );
+    const userPostsSnap = await getDocs(userPostsQuery);
+
+    if (!userPostsSnap.empty) {
+      const BATCH_SIZE = 450;
+      const docs = userPostsSnap.docs;
+      for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+        const chunk = docs.slice(i, i + BATCH_SIZE);
+        const batch = writeBatch(db);
+        for (const postDoc of chunk) {
+          batch.update(postDoc.ref, { username: newUsername });
+        }
+        await batch.commit();
+      }
+    }
+
+    $("profileForm").hidden = true;
+    showToast(`Profil berhasil diperbarui${userPostsSnap.size > 0 ? ` dan disinkronkan ke ${userPostsSnap.size} postingan` : ""}!`, "success");
+  } catch (error) {
+    console.error("Update profile error detail:", error.code, error.message, error);
+    showToast("Profil gagal diperbarui: " + (error.code ? `[${error.code}] ` : "") + error.message, "error");
+  } finally {
+    isUpdatingProfile = false;
+    if (saveBtn) saveBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+/* ==========================================================================
+   8. PEMBUATAN POSTINGAN, PREVIEW MEDIA & UPLOAD CLOUDINARY
+   ========================================================================== */
+// Live character counter untuk caption
+$("caption")?.addEventListener("input", event => {
+  const counter = $("captionCounter");
+  if (counter) counter.textContent = `${event.target.value.length}/2200`;
+});
+
+// Pilih media dan tampilkan preview instan
+$("mediaFile")?.addEventListener("change", event => {
+  const file = event.target.files && event.target.files[0];
+  const previewBox = $("mediaPreviewBox");
+  const imgPreview = $("mediaPreviewImg");
+  const videoPreview = $("mediaPreviewVideo");
+  const fileNameText = $("previewFileName");
+
+  if (!file) {
+    if (previewBox) previewBox.hidden = true;
+    return;
+  }
+
+  // Validasi file sebelum preview
+  const validation = validateMediaFile(file);
+  if (!validation.valid) {
+    showToast(validation.message, "warning");
+    event.target.value = "";
+    if (previewBox) previewBox.hidden = true;
+    return;
+  }
+
+  // Bersihkan object URL lama jika ada
+  if (selectedMediaObjectUrl) {
+    URL.revokeObjectURL(selectedMediaObjectUrl);
+  }
+
+  selectedMediaObjectUrl = URL.createObjectURL(file);
+
+  if (validation.mediaType === "image") {
+    imgPreview.src = selectedMediaObjectUrl;
+    imgPreview.hidden = false;
+    videoPreview.hidden = true;
+    videoPreview.pause();
+  } else {
+    videoPreview.src = selectedMediaObjectUrl;
+    videoPreview.hidden = false;
+    imgPreview.hidden = true;
+  }
+
+  fileNameText.textContent = `${file.name} (${formatFileSize(file.size)})`;
+  previewBox.hidden = false;
+});
+
+// Tombol hapus media yang sudah dipilih
+$("removeMediaBtn")?.addEventListener("click", () => {
+  const fileInput = $("mediaFile");
+  if (fileInput) fileInput.value = "";
+  if (selectedMediaObjectUrl) {
+    URL.revokeObjectURL(selectedMediaObjectUrl);
+    selectedMediaObjectUrl = null;
+  }
+  const previewBox = $("mediaPreviewBox");
+  if (previewBox) previewBox.hidden = true;
+});
+
+// Buka modal bantuan konfigurasi Cloudinary
+$("cloudinaryHelpBtn")?.addEventListener("click", () => {
+  openModal("cloudinaryGuideModal");
+});
+
+// Navigasi cepat scroll ke form posting
+$("navCreateBtn")?.addEventListener("click", () => {
+  const card = $("createPostCard");
+  if (card) {
+    card.scrollIntoView({ behavior: "smooth" });
+    $("caption")?.focus();
+  }
+});
+
+$("navProfileBtn")?.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+
+// Submit Form Buat Postingan
+$("postForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!currentUser || isSubmittingPost) return;
+
+  const fileInput = $("mediaFile");
+  const file = fileInput.files && fileInput.files[0];
+  const caption = $("caption").value.trim();
+  const uploadBtn = $("uploadButton");
+  const spinner = uploadBtn?.querySelector(".spinner");
+  const progressBox = $("uploadProgressBox");
+  const progressBar = $("uploadProgressBar");
+  const progressText = $("uploadProgressText");
+
+  if (!file && !caption) {
+    showToast("Silakan tulis caption atau pilih media untuk dibagikan.", "warning");
+    return;
+  }
+
+  if (caption.length > 2200) {
+    showToast("Caption maksimal 2200 karakter.", "warning");
+    return;
+  }
+
+  let mediaUrl = "";
+  let mediaPath = "";
+  let mediaPublicId = "";
+  let mediaType = "text";
+
+  // Jika melampirkan media foto atau video
+  if (file) {
+    const validation = validateMediaFile(file);
+    if (!validation.valid) {
+      showToast(validation.message, "warning");
+      return;
+    }
+
+    // Cek apakah Cloudinary sudah dikonfigurasi
+    if (!CLOUDINARY_CONFIG.cloudName || !CLOUDINARY_CONFIG.uploadPreset) {
+      openModal("cloudinaryGuideModal");
+      showToast("Layanan Cloudinary belum dikonfigurasi di firebase.js. Anda tetap bisa membuat postingan teks dengan menghapus pilihan media.", "info");
+      return;
+    }
+
+    isSubmittingPost = true;
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (spinner) spinner.hidden = false;
+    if (progressBox) progressBox.hidden = false;
+    if (progressBar) progressBar.style.width = "0%";
+    if (progressText) progressText.textContent = "Mengunggah media: 0%";
+
+    try {
+      const uploaded = await uploadToCloudinary(file, percent => {
+        if (progressBar) progressBar.style.width = `${percent}%`;
+        if (progressText) progressText.textContent = `Mengunggah media: ${percent}%`;
+      });
+
+      mediaUrl = uploaded.secureUrl;
+      mediaPublicId = uploaded.publicId;
+      mediaPath = ""; // Wajib string kosong untuk postingan Cloudinary
+      mediaType = uploaded.resourceType;
+    } catch (uploadErr) {
+      console.error("Upload media error detail:", uploadErr);
+      showToast(`Gagal mengunggah media: ${uploadErr.message}`, "error");
+      isSubmittingPost = false;
+      if (uploadBtn) uploadBtn.disabled = false;
+      if (spinner) spinner.hidden = true;
+      if (progressBox) progressBox.hidden = true;
+      return;
+    }
+  }
+
+  isSubmittingPost = true;
+  if (uploadBtn) uploadBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    const currentUsername = currentProfile?.username || "Pengguna";
+    const postRef = doc(collection(db, "posts"));
+
+    await setDoc(postRef, {
+      uid: currentUser.uid,
+      username: currentUsername,
+      caption,
+      mediaUrl,
+      mediaPath,
+      mediaPublicId,
+      mediaType,
+      createdAt: serverTimestamp()
+    });
+
+    // Reset Form Postingan
+    $("postForm").reset();
+    $("captionCounter").textContent = "0/2200";
+    if (selectedMediaObjectUrl) {
+      URL.revokeObjectURL(selectedMediaObjectUrl);
+      selectedMediaObjectUrl = null;
+    }
+    $("mediaPreviewBox").hidden = true;
+    if (progressBox) progressBox.hidden = true;
+
+    showToast(mediaUrl ? "Momen Anda berhasil diposting!" : "Postingan teks berhasil dibuat!", "success");
+  } catch (postErr) {
+    console.error("Save post error detail:", postErr.code, postErr.message, postErr);
+    showToast("Postingan gagal disimpan: " + (postErr.code ? `[${postErr.code}] ` : "") + postErr.message, "error");
+  } finally {
+    isSubmittingPost = false;
+    if (uploadBtn) uploadBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+/* ==========================================================================
+   9. FEED POSTINGAN REAL-TIME
+   ========================================================================== */
+function loadFeed() {
+  if (unsubscribeFeed) unsubscribeFeed();
+
+  const feed = $("feed");
+  const emptyFeed = $("emptyFeed");
+  const skeleton = $("feedSkeleton");
+
+  if (skeleton) skeleton.hidden = false;
+
+  const feedQuery = query(
+    collection(db, "posts"),
+    orderBy("createdAt", "desc")
+  );
+
+  unsubscribeFeed = onSnapshot(feedQuery, snapshot => {
+    if (skeleton) skeleton.hidden = true;
+    feed.replaceChildren();
+
+    let myPostsCount = 0;
+
+    if (snapshot.empty) {
+      if (emptyFeed) emptyFeed.hidden = false;
+      $("profilePostCountBadge").textContent = "0 Postingan";
+      return;
+    }
+
+    if (emptyFeed) emptyFeed.hidden = true;
+
+    snapshot.forEach(postSnapshot => {
+      const post = postSnapshot.data();
+      const postId = postSnapshot.id;
+
+      if (currentUser && post.uid === currentUser.uid) {
+        myPostsCount++;
+      }
+
+      const card = document.createElement("article");
+      card.className = "post-card";
+
+      // Header Postingan
+      const authorUsername = safeText(post.username || "Pengguna");
+      const authorInitial = authorUsername.charAt(0).toUpperCase();
+      const formattedDate = formatDate(post.createdAt);
+
+      const header = document.createElement("div");
+      header.className = "post-header";
+      header.innerHTML = `
+        <div class="post-author-box">
+          <div class="avatar-mini">${authorInitial}</div>
+          <div>
+            <div class="post-author-name">${authorUsername}</div>
+            <div class="post-date">${formattedDate}</div>
+          </div>
+        </div>
+      `;
+
+      card.append(header);
+
+      // Media Postingan (Foto atau Video)
+      if (post.mediaUrl && (post.mediaUrl.startsWith("http://") || post.mediaUrl.startsWith("https://"))) {
+        const mediaContainer = document.createElement("div");
+        mediaContainer.className = "post-media-container";
+
+        if (post.mediaType === "video") {
+          const video = document.createElement("video");
+          video.className = "post-media";
+          video.src = post.mediaUrl;
+          video.controls = true;
+          video.preload = "metadata";
+          video.playsInline = true;
+          mediaContainer.append(video);
+        } else if (post.mediaType === "image") {
+          const img = document.createElement("img");
+          img.className = "post-media";
+          img.src = post.mediaUrl;
+          img.alt = "Foto postingan";
+          img.loading = "lazy";
+          mediaContainer.append(img);
+        }
+
+        card.append(mediaContainer);
+      }
+
+      // Caption Postingan
+      if (post.caption) {
+        const captionBox = document.createElement("div");
+        captionBox.className = "post-caption-box";
+        captionBox.textContent = safeText(post.caption);
+        card.append(captionBox);
+      }
+
+      // Tombol Hapus (Hanya untuk pemilik postingan)
+      if (currentUser && post.uid === currentUser.uid) {
+        const actionsRow = document.createElement("div");
+        actionsRow.className = "post-actions-row";
+
+        const deleteBtn = document.createElement("button");
+        deleteBtn.className = "btn-delete-post";
+        deleteBtn.type = "button";
+        deleteBtn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+          <span>Hapus</span>
+        `;
+
+        deleteBtn.addEventListener("click", () => {
+          postToDeleteId = postId;
+          openModal("deletePostModal");
+        });
+
+        actionsRow.append(deleteBtn);
+        card.append(actionsRow);
+      }
+
+      feed.append(card);
+    });
+
+    // Update jumlah postingan pengguna di kartu profil
+    $("profilePostCountBadge").textContent = `${myPostsCount} Postingan`;
+  }, error => {
+    if (skeleton) skeleton.hidden = true;
+    console.error("Feed listener error detail:", error.code, error.message, error);
+    showToast("Feed gagal dimuat: " + (error.code ? `[${error.code}] ` : "") + "Periksa aturan keamanan Firestore.", "error");
+  });
+}
+
+/* ==========================================================================
+   10. MODAL WORKFLOW: LOGOUT, HAPUS POSTINGAN, & HAPUS AKUN
+   ========================================================================== */
+
+// --- A. LOGOUT ---
+$("logoutButton")?.addEventListener("click", () => {
+  openModal("logoutModal");
+});
+
+$("cancelLogoutBtn")?.addEventListener("click", () => {
+  closeModal("logoutModal");
+});
+
+$("confirmLogoutBtn")?.addEventListener("click", async () => {
+  closeModal("logoutModal");
+  try {
+    if (unsubscribeFeed) {
+      unsubscribeFeed();
+      unsubscribeFeed = null;
+    }
+    await signOut(auth);
+    currentUser = null;
+    currentProfile = null;
+    showToast("Anda telah keluar dari akun.", "info");
+  } catch (error) {
+    console.error("Logout error:", error);
+    showToast("Gagal keluar: " + error.message, "error");
+  }
+});
+
+// --- B. HAPUS POSTINGAN ---
+$("cancelDeletePostBtn")?.addEventListener("click", () => {
+  postToDeleteId = null;
+  closeModal("deletePostModal");
+});
+
+$("confirmDeletePostBtn")?.addEventListener("click", async () => {
+  if (!postToDeleteId || !currentUser) return;
+
+  const btn = $("confirmDeletePostBtn");
+  const spinner = btn?.querySelector(".spinner");
+  if (btn) btn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    const postRef = doc(db, "posts", postToDeleteId);
+    const postSnap = await getDoc(postRef);
+
+    if (!postSnap.exists() || postSnap.data().uid !== currentUser.uid) {
+      throw new Error("Akses ditolak: Anda bukan pemilik postingan ini.");
+    }
+
+    const postData = postSnap.data();
+    await deleteDoc(postRef);
+
+    // Kompatibilitas jika postingan lama memiliki file Firebase Storage
+    if (postData.mediaPath && !postData.mediaPublicId && !postData.mediaUrl?.includes("cloudinary")) {
+      try {
+        await deleteObject(ref(storage, postData.mediaPath));
+      } catch (e) {
+        console.warn("Storage cleanup notice:", e);
+      }
+    }
+
+    closeModal("deletePostModal");
+    postToDeleteId = null;
+
+    if (postData.mediaPublicId) {
+      showToast("Postingan dihapus dari feed. (Catatan: file di Cloudinary tetap tersimpan karena penghapusan Cloudinary memerlukan API Secret di backend).", "success");
+    } else {
+      showToast("Postingan berhasil dihapus.", "success");
+    }
+  } catch (error) {
+    console.error("Delete post error detail:", error.code, error.message, error);
+    showToast("Gagal menghapus postingan: " + (error.code ? `[${error.code}] ` : "") + error.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+// --- C. HAPUS AKUN SECARA AMAN DENGAN VERIFIKASI KATA SANDI ---
+$("deleteAccountButton")?.addEventListener("click", () => {
+  const pwdInput = $("deleteAccountPassword");
+  if (pwdInput) pwdInput.value = "";
+  openModal("deleteAccountModal");
+});
+
+$("cancelDeleteAccountBtn")?.addEventListener("click", () => {
+  closeModal("deleteAccountModal");
+});
+
+$("confirmDeleteAccountBtn")?.addEventListener("click", async () => {
+  if (!currentUser || isDeletingAccount) return;
+
+  const pwdInput = $("deleteAccountPassword");
+  const password = pwdInput ? pwdInput.value : "";
+  const confirmBtn = $("confirmDeleteAccountBtn");
+  const spinner = confirmBtn?.querySelector(".spinner");
+
+  if (!password) {
+    showToast("Silakan masukkan kata sandi akun Anda untuk konfirmasi.", "warning");
+    pwdInput?.focus();
+    return;
+  }
+
+  isDeletingAccount = true;
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  const user = currentUser;
+
+  try {
+    // 1. TAHAP 1: Re-autentikasi pengguna terlebih dahulu
+    // Jika kata sandi salah, proses langsung batal TANPA menghapus data apa pun di Firestore
+    const credential = EmailAuthProvider.credential(user.email, password);
+    await reauthenticateWithCredential(user, credential);
+  } catch (authErr) {
+    console.error("Re-authentication error detail:", authErr.code, authErr.message);
+    isDeletingAccount = false;
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+    showToast("Kata sandi salah. Verifikasi gagal, tidak ada data yang dihapus.", "error");
+    return;
+  }
+
+  // 2. TAHAP 2: Re-autentikasi berhasil, lanjutkan penghapusan postingan di Firestore
+  try {
+    const postsQuery = query(collection(db, "posts"), where("uid", "==", user.uid));
+    const postsSnapshot = await getDocs(postsQuery);
+    let hasCloudinaryMedia = false;
+
+    // Bersihkan file Firebase Storage lama jika ada
+    for (const item of postsSnapshot.docs) {
+      const p = item.data();
+      if (p.mediaPublicId) hasCloudinaryMedia = true;
+      if (p.mediaPath && !p.mediaPublicId && !p.mediaUrl?.includes("cloudinary")) {
+        try {
+          await deleteObject(ref(storage, p.mediaPath));
+        } catch (e) {
+          console.warn("Storage cleanup notice:", e);
+        }
+      }
+    }
+
+    // Hapus seluruh dokumen postingan menggunakan writeBatch
+    if (!postsSnapshot.empty) {
+      const BATCH_SIZE = 450;
+      const docs = postsSnapshot.docs;
+      for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+        const chunk = docs.slice(i, i + BATCH_SIZE);
+        const batch = writeBatch(db);
+        for (const item of chunk) {
+          batch.delete(item.ref);
+        }
+        await batch.commit();
+      }
+    }
+
+    // 3. TAHAP 3: Hapus dokumen profil pengguna di Firestore
+    await deleteDoc(doc(db, "users", user.uid));
+
+    // 4. TAHAP 4: Hapus akun pengguna di Firebase Authentication
+    try {
+      await deleteUser(user);
+    } catch (authDeleteErr) {
+      console.error("Delete user auth error detail:", authDeleteErr);
+      closeModal("deleteAccountModal");
+      showToast("Data Firestore berhasil dihapus, namun penutupan akun Firebase Auth terkendala jaringan. Silakan keluar dan login ulang.", "warning");
+      isDeletingAccount = false;
+      return;
+    }
+
+    closeModal("deleteAccountModal");
+    showToast("Akun Anda berhasil dihapus secara permanen.", "success");
+  } catch (error) {
+    console.error("Delete account error detail:", error.code, error.message, error);
+    showToast("Gagal menyelesaikan penghapusan akun: " + (error.code ? `[${error.code}] ` : "") + error.message, "error");
+  } finally {
+    isDeletingAccount = false;
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
