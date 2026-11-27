@@ -1995,6 +1995,10 @@ input:focus + .input-svg,
   white-space: pre-line;
 }
 
+.user-preview-action-btn {
+  margin-top: 14px;
+}
+
 /* Padding helper */
 .p-0 {
   padding: 0 !important;

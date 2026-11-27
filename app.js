@@ -2304,9 +2304,52 @@ function extractMentions(text) {
   if (!text) return [];
   const matches = text.match(/@([a-zA-Z0-9_.]{3,30})/g);
   if (!matches) return [];
-  // Normalisasi dan hilangkan duplikasi username
-  const usernames = matches.map(m => m.slice(1).toLowerCase());
-  return Array.from(new Set(usernames));
+  // Pertahankan huruf asli sambil hilangkan duplikasi secara case-insensitive
+  const seen = new Set();
+  const usernames = [];
+  for (const raw of matches) {
+    const clean = raw.slice(1);
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      usernames.push(clean);
+    }
+  }
+  return usernames;
+}
+
+async function findUserByUsername(username) {
+  const cleanUsername = (username || "").replace(/^@/, "").trim();
+  if (!cleanUsername) return null;
+
+  // 1. Cari kecocokan persis di Firestore
+  const exactSnap = await getDocs(query(collection(db, "users"), where("username", "==", cleanUsername)));
+  if (!exactSnap.empty) {
+    const docSnap = exactSnap.docs[0];
+    return { uid: docSnap.id, data: docSnap.data() };
+  }
+
+  // 2. Fallback case-insensitive melalui cache profil & feed yang sudah dimuat
+  const targetLower = cleanUsername.toLowerCase();
+  let matchedUid = null;
+
+  for (const [uid, cached] of userProfilesCache.entries()) {
+    if (cached?.username && cached.username.toLowerCase() === targetLower) {
+      matchedUid = uid;
+      break;
+    }
+  }
+
+  if (!matchedUid) {
+    const postMatch = rawFeedPosts.find(p => p.uid && p.username && p.username.toLowerCase() === targetLower);
+    if (postMatch) matchedUid = postMatch.uid;
+  }
+
+  if (!matchedUid) return null;
+
+  const userSnap = await getDoc(doc(db, "users", matchedUid));
+  if (!userSnap.exists()) return null;
+  return { uid: userSnap.id, data: userSnap.data() };
 }
 
 async function sendMentionNotifications(text, postId, commentId = "") {
@@ -2319,11 +2362,9 @@ async function sendMentionNotifications(text, postId, commentId = "") {
     if (username.toLowerCase() === (currentProfile.username || "").toLowerCase()) continue;
 
     try {
-      const q = query(collection(db, "users"), where("username", "==", username));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        const targetDoc = snap.docs[0];
-        const targetUid = targetDoc.id;
+      const found = await findUserByUsername(username);
+      if (found) {
+        const targetUid = found.uid;
 
         // Validasi keamanan: jangan kirim ke diri sendiri
         if (targetUid === currentUser.uid) continue;
@@ -2360,24 +2401,37 @@ document.addEventListener("click", event => {
   }
 });
 
+let previewedProfileUsername = "";
+
+$("userPreviewViewPostsBtn")?.addEventListener("click", () => {
+  const targetUsername = previewedProfileUsername;
+  closeModal("userPreviewModal");
+  if (!targetUsername) return;
+
+  const searchInput = $("feedSearchInput");
+  if (searchInput) searchInput.value = targetUsername;
+  feedSearchKeyword = targetUsername;
+  renderFilteredFeed();
+
+  $("feed")?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
 async function showUserProfilePreview(username) {
   if (!username) return;
   const cleanUsername = username.replace(/^@/, "").trim();
 
   try {
-    const q = query(collection(db, "users"), where("username", "==", cleanUsername));
-    const snap = await getDocs(q);
+    const found = await findUserByUsername(cleanUsername);
 
-    if (snap.empty) {
+    if (!found) {
       showToast(`Pengguna @${cleanUsername} tidak ditemukan.`, "warning");
       return;
     }
 
-    const userDoc = snap.docs[0];
-    const userData = userDoc.data();
-    const userUid = userDoc.id;
-
+    const userData = found.data;
+    const userUid = found.uid;
     const initial = (userData.username || "U").charAt(0).toUpperCase();
+    previewedProfileUsername = userData.username || "";
 
     $("userPreviewTitle").textContent = `Profil @${userData.username}`;
     renderAvatarElement($("userPreviewAvatar"), userData.photoURL, initial, userData.username);
@@ -2388,6 +2442,11 @@ async function showUserProfilePreview(username) {
     const postsQuery = query(collection(db, "posts"), where("uid", "==", userUid));
     const postsSnap = await getDocs(postsQuery);
     $("userPreviewPostsCount").textContent = `${postsSnap.size} Postingan`;
+
+    const viewPostsBtn = $("userPreviewViewPostsBtn");
+    if (viewPostsBtn) {
+      viewPostsBtn.hidden = postsSnap.size === 0;
+    }
 
     openModal("userPreviewModal");
   } catch (err) {
