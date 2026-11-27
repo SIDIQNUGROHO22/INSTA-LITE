@@ -250,7 +250,7 @@
 
           <!-- Upload Dropzone / File Picker -->
           <div class="upload-zone">
-            <input id="mediaFile" type="file" accept="image/jpeg,image/png,video/mp4,video/quicktime" class="file-input-hidden">
+            <input id="mediaFile" type="file" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm" class="file-input-hidden">
             <label for="mediaFile" class="file-input-label">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
@@ -258,7 +258,7 @@
                 <polyline points="21 15 16 10 5 21"></polyline>
               </svg>
               <span class="upload-label-main">Pilih Foto atau Video</span>
-              <span class="upload-label-sub">JPG/PNG maks 10 MB • MP4/MOV maks 50 MB (Opsional)</span>
+              <span class="upload-label-sub">JPG/PNG/WebP maks 10 MB • MP4/MOV/WebM maks 50 MB (Opsional)</span>
             </label>
           </div>
 
@@ -425,7 +425,7 @@
               </div>
               <div class="avatar-edit-controls">
                 <div class="avatar-btn-row">
-                  <input id="profilePhotoInput" type="file" accept="image/jpeg,image/png" class="file-input-hidden">
+                  <input id="profilePhotoInput" type="file" accept="image/jpeg,image/png,image/webp" class="file-input-hidden">
                   <button id="pickProfilePhotoBtn" class="btn-secondary btn-sm" type="button">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
@@ -441,7 +441,7 @@
                     <span>Hapus</span>
                   </button>
                 </div>
-                <p class="field-hint">Format JPG, JPEG, atau PNG (Maks 5 MB).</p>
+                <p class="field-hint">Format JPG, JPEG, PNG, atau WebP (Maks 5 MB).</p>
                 <div id="profilePhotoCropControl" class="avatar-zoom-box" hidden>
                   <div class="label-row">
                     <label for="profilePhotoZoomSlider" class="zoom-label">Perbesar / Skala Foto</label>
@@ -578,7 +578,7 @@
         <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="cloudinaryGuideModal">&times;</button>
       </div>
       <div class="modal-body guide-content">
-        <p>Agar fitur upload foto dan video dapat berfungsi tanpa biaya (paket Spark Firebase gratis), ikuti 3 langkah mudah berikut:</p>
+        <p><strong>Foto</strong> sudah bisa langsung diupload gratis (otomatis dikompresi ke Firestore). Untuk mengaktifkan upload <strong>video (MP4/MOV/WebM hingga 50 MB)</strong> dan foto kualitas asli tanpa biaya (paket Spark Firebase gratis), ikuti 3 langkah berikut:</p>
         <ol class="guide-steps">
           <li>Daftar akun gratis di <a href="https://cloudinary.com" target="_blank" rel="noopener">cloudinary.com</a> (100% gratis, tanpa kartu kredit).</li>
           <li>Buka <strong>Settings</strong> &gt; tab <strong>Upload</strong> &gt; scroll ke <strong>Upload presets</strong> &gt; klik <strong>Add upload preset</strong>. Ubah <em>Signing Mode</em> menjadi <strong>Unsigned</strong>, lalu simpan.</li>
@@ -589,7 +589,7 @@
 };</code></pre>
           </li>
         </ol>
-        <p class="hint">Jika belum dikonfigurasi, Anda tetap dapat membuat postingan teks dengan mengosongkan pilihan foto/video.</p>
+        <p class="hint">Jika belum diisi, postingan foto &amp; foto profil tetap berjalan otomatis melalui kompresi Firestore.</p>
       </div>
       <div class="modal-footer">
         <button id="dismissCloudinaryGuideBtn" class="modal-close-btn-bottom btn-primary" type="button" data-close-modal="cloudinaryGuideModal">Mengerti</button>

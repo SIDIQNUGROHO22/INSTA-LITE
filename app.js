@@ -63,25 +63,25 @@ const hidingPostsSet = new Set();
 
 // Batasan format foto profil
 const ALLOWED_PROFILE_PHOTO = {
-  extensions: [".jpg", ".jpeg", ".png"],
-  mimeTypes: ["image/jpeg", "image/png"],
+  extensions: [".jpg", ".jpeg", ".png", ".webp"],
+  mimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/webp"],
   maxSize: 5 * 1024 * 1024,
-  label: "JPG/JPEG/PNG (maksimal 5 MB)"
+  label: "JPG/JPEG/PNG/WebP (maksimal 5 MB)"
 };
 
 // Batasan format dan ukuran file media postingan
 const ALLOWED_MEDIA = {
   images: {
-    extensions: [".jpg", ".jpeg", ".png"],
-    mimeTypes: ["image/jpeg", "image/png"],
+    extensions: [".jpg", ".jpeg", ".png", ".webp"],
+    mimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/webp"],
     maxSize: 10 * 1024 * 1024,
-    label: "JPG/JPEG/PNG (maksimal 10 MB)"
+    label: "JPG/JPEG/PNG/WebP (maksimal 10 MB)"
   },
   videos: {
-    extensions: [".mp4", ".mov"],
-    mimeTypes: ["video/mp4", "video/quicktime"],
+    extensions: [".mp4", ".mov", ".webm"],
+    mimeTypes: ["video/mp4", "video/quicktime", "video/webm"],
     maxSize: 50 * 1024 * 1024,
-    label: "MP4/MOV (maksimal 50 MB)"
+    label: "MP4/MOV/WebM (maksimal 50 MB)"
   }
 };
 
@@ -318,27 +318,55 @@ function getAuthErrorMessage(code) {
   }
 }
 
+function normalizeMimeType(mime) {
+  return String(mime || "").toLowerCase().split(";")[0].trim();
+}
+
+function isSafeMediaUrl(url) {
+  if (typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) return true;
+  return /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/i.test(trimmed);
+}
+
+function isVideoFile(file) {
+  if (!file) return false;
+  const mime = normalizeMimeType(file.type);
+  const name = (file.name || "").toLowerCase();
+  return mime.startsWith("video/") || name.endsWith(".mp4") || name.endsWith(".mov") || name.endsWith(".webm");
+}
+
+function hasCloudinaryConfig() {
+  return Boolean(
+    CLOUDINARY_CONFIG?.cloudName &&
+    CLOUDINARY_CONFIG.cloudName.trim() &&
+    CLOUDINARY_CONFIG?.uploadPreset &&
+    CLOUDINARY_CONFIG.uploadPreset.trim()
+  );
+}
+
 // Validasi lengkap file foto dan video sebelum upload
 function validateMediaFile(file) {
   const fileName = file.name || "";
   const lastDot = fileName.lastIndexOf(".");
   if (lastDot === -1) {
-    return { valid: false, message: "File tidak memiliki ekstensi. Gunakan JPG, PNG, MP4, atau MOV." };
+    return { valid: false, message: "File tidak memiliki ekstensi. Gunakan JPG, PNG, WebP, MP4, MOV, atau WebM." };
   }
 
   const ext = fileName.slice(lastDot).toLowerCase();
-  const mime = (file.type || "").toLowerCase();
+  const mime = normalizeMimeType(file.type);
 
   const isImageExt = ALLOWED_MEDIA.images.extensions.includes(ext);
   const isVideoExt = ALLOWED_MEDIA.videos.extensions.includes(ext);
 
   if (!isImageExt && !isVideoExt) {
-    return { valid: false, message: "Format tidak didukung. Format yang diizinkan: JPG, PNG, MP4, atau MOV." };
+    return { valid: false, message: "Format tidak didukung. Gunakan JPG, PNG, WebP, MP4, MOV, atau WebM." };
   }
 
   if (isImageExt) {
     if (mime && !ALLOWED_MEDIA.images.mimeTypes.includes(mime)) {
-      return { valid: false, message: "Tipe MIME file gambar tidak valid. Gunakan file JPG atau PNG." };
+      return { valid: false, message: "Tipe file gambar tidak valid. Gunakan file JPG, PNG, atau WebP." };
     }
     if (file.size > ALLOWED_MEDIA.images.maxSize) {
       return { valid: false, message: "Ukuran file foto melebihi batas maksimal 10 MB." };
@@ -348,7 +376,7 @@ function validateMediaFile(file) {
 
   if (isVideoExt) {
     if (mime && !ALLOWED_MEDIA.videos.mimeTypes.includes(mime)) {
-      return { valid: false, message: "Tipe MIME file video tidak valid. Gunakan file video MP4 atau MOV." };
+      return { valid: false, message: "Tipe file video tidak valid. Gunakan file video MP4, MOV, atau WebM." };
     }
     if (file.size > ALLOWED_MEDIA.videos.maxSize) {
       return { valid: false, message: "Ukuran file video melebihi batas maksimal 50 MB." };
@@ -360,17 +388,79 @@ function validateMediaFile(file) {
 }
 
 /* ==========================================================================
-   4. UPLOAD CLOUDINARY (DENGAN REAL PROGRESS BAR & ENDPOINT KHUSUS)
+   4. UPLOAD MEDIA (CLOUDINARY UTAMA + KOMPRESI FIRESTORE FALLBACK FOTO)
    ========================================================================== */
+function formatCloudinaryError(rawMessage) {
+  const msg = safeText(rawMessage);
+  if (/unsigned/i.test(msg)) {
+    return "Upload Preset Cloudinary harus bertipe Unsigned (Settings -> Upload -> Upload presets).";
+  }
+  if (/cloud_name|unknown api key|not found/i.test(msg)) {
+    return "Cloud Name atau Upload Preset Cloudinary di firebase.js tidak ditemukan.";
+  }
+  return msg;
+}
+
+async function compressImageToDataUrl(file, { maxDimension = 1080, maxDataUrlLength = 600000 } = {}) {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("File gambar rusak atau tidak dapat dibaca browser."));
+      image.src = objectUrl;
+    });
+
+    const srcWidth = img.naturalWidth || img.width;
+    const srcHeight = img.naturalHeight || img.height;
+    if (!srcWidth || !srcHeight) {
+      throw new Error("Dimensi gambar tidak valid.");
+    }
+
+    const baseRatio = Math.min(1, maxDimension / Math.max(srcWidth, srcHeight));
+    const scaleSteps = [1, 0.78, 0.6, 0.45];
+    const qualitySteps = [0.84, 0.72, 0.58, 0.44];
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Browser tidak mendukung pemrosesan gambar Canvas.");
+    }
+
+    for (const scale of scaleSteps) {
+      const targetWidth = Math.max(1, Math.round(srcWidth * baseRatio * scale));
+      const targetHeight = Math.max(1, Math.round(srcHeight * baseRatio * scale));
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+
+      // Isi latar putih agar gambar PNG/WebP transparan tidak berubah menjadi hitam saat dikonversi ke JPEG
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, targetWidth, targetHeight);
+      ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+      for (const quality of qualitySteps) {
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        if (dataUrl.length <= maxDataUrlLength) {
+          return dataUrl;
+        }
+      }
+    }
+
+    throw new Error("Ukuran gambar tetap terlalu besar setelah dikompresi untuk disimpan ke Firestore.");
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function uploadToCloudinary(file, onProgress) {
-  const { cloudName, uploadPreset } = CLOUDINARY_CONFIG;
+  const cloudName = (CLOUDINARY_CONFIG?.cloudName || "").trim();
+  const uploadPreset = (CLOUDINARY_CONFIG?.uploadPreset || "").trim();
   if (!cloudName || !uploadPreset) {
     throw new Error("CONFIG_MISSING");
   }
 
-  const isVideo = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4") || file.name.toLowerCase().endsWith(".mov");
-  const resourceType = isVideo ? "video" : "image";
-  const url = `https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`;
+  const resourceType = isVideoFile(file) ? "video" : "image";
+  const url = `https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/${resourceType}/upload`;
 
   const formData = new FormData();
   formData.append("file", file);
@@ -403,7 +493,7 @@ async function uploadToCloudinary(file, onProgress) {
             resourceType: resourceType
           });
         } else {
-          const msg = data?.error?.message || `HTTP ${xhr.status} ${xhr.statusText}`;
+          const msg = formatCloudinaryError(data?.error?.message || `HTTP ${xhr.status} ${xhr.statusText}`);
           reject(new Error(msg));
         }
       } catch (err) {
@@ -414,6 +504,36 @@ async function uploadToCloudinary(file, onProgress) {
     xhr.onerror = () => reject(new Error("Gagal terhubung ke server Cloudinary. Periksa jaringan Anda."));
     xhr.send(formData);
   });
+}
+
+async function uploadMediaAsset(file, { isProfilePhoto = false, onProgress } = {}) {
+  if (hasCloudinaryConfig()) {
+    const uploaded = await uploadToCloudinary(file, onProgress);
+    return {
+      url: uploaded.secureUrl,
+      publicId: uploaded.publicId,
+      mediaType: uploaded.resourceType,
+      mode: "cloudinary"
+    };
+  }
+
+  if (isVideoFile(file)) {
+    throw new Error("VIDEO_REQUIRES_CLOUDINARY");
+  }
+
+  onProgress?.(30);
+  const dataUrl = await compressImageToDataUrl(file, {
+    maxDimension: isProfilePhoto ? 256 : 1080,
+    maxDataUrlLength: isProfilePhoto ? 75000 : 600000
+  });
+  onProgress?.(100);
+
+  return {
+    url: dataUrl,
+    publicId: "",
+    mediaType: "image",
+    mode: "firestore"
+  };
 }
 
 /* ==========================================================================
@@ -659,8 +779,13 @@ onAuthStateChanged(auth, async user => {
 
 function renderAvatarElement(container, photoURL, initial, username = "Pengguna") {
   if (!container) return;
-  if (photoURL && typeof photoURL === "string" && photoURL.trim().length > 0) {
-    container.innerHTML = `<img src="${photoURL}" alt="${safeText(username)}" class="avatar-photo-img" loading="lazy">`;
+  if (isSafeMediaUrl(photoURL)) {
+    const img = document.createElement("img");
+    img.src = photoURL.trim();
+    img.alt = safeText(username);
+    img.className = "avatar-photo-img";
+    img.loading = "lazy";
+    container.replaceChildren(img);
   } else {
     container.textContent = initial || "U";
   }
@@ -759,10 +884,10 @@ $("profilePhotoInput")?.addEventListener("change", event => {
   const fileName = file.name || "";
   const lastDot = fileName.lastIndexOf(".");
   const ext = lastDot !== -1 ? fileName.slice(lastDot).toLowerCase() : "";
-  const mime = (file.type || "").toLowerCase();
+  const mime = normalizeMimeType(file.type);
 
   if (!ALLOWED_PROFILE_PHOTO.extensions.includes(ext) || (mime && !ALLOWED_PROFILE_PHOTO.mimeTypes.includes(mime))) {
-    const msg = "Format foto tidak didukung. Gunakan file JPG, JPEG, atau PNG.";
+    const msg = "Format foto tidak didukung. Gunakan file JPG, JPEG, PNG, atau WebP.";
     if (errorEl) { errorEl.textContent = msg; errorEl.hidden = false; }
     showToast(msg, "warning");
     event.target.value = "";
@@ -856,26 +981,17 @@ $("profileForm")?.addEventListener("submit", async event => {
       }
     }
 
-    // 2. Upload foto profil jika ada file baru yang dipilih ke Cloudinary
+    // 2. Proses foto profil (Cloudinary jika dikonfigurasi, atau kompresi Firestore gratis)
     let newPhotoURL = undefined;
     let newPhotoPublicId = undefined;
 
     if (pendingProfilePhotoFile) {
-      if (!CLOUDINARY_CONFIG.cloudName || !CLOUDINARY_CONFIG.uploadPreset) {
-        isUpdatingProfile = false;
-        if (saveBtn) saveBtn.disabled = false;
-        if (spinner) spinner.hidden = true;
-        openModal("cloudinaryGuideModal");
-        showToast("Layanan Cloudinary belum dikonfigurasi di firebase.js.", "error");
-        return;
-      }
-
       try {
-        const uploaded = await uploadToCloudinary(pendingProfilePhotoFile);
-        newPhotoURL = uploaded.secureUrl;
+        const uploaded = await uploadMediaAsset(pendingProfilePhotoFile, { isProfilePhoto: true });
+        newPhotoURL = uploaded.url;
         newPhotoPublicId = uploaded.publicId;
       } catch (uploadErr) {
-        console.error("Gagal mengunggah foto profil ke Cloudinary:", uploadErr);
+        console.error("Gagal mengunggah foto profil:", uploadErr);
         isUpdatingProfile = false;
         if (saveBtn) saveBtn.disabled = false;
         if (spinner) spinner.hidden = true;
@@ -1081,6 +1197,7 @@ $("postForm")?.addEventListener("submit", async event => {
   let mediaPath = "";
   let mediaPublicId = "";
   let mediaType = "text";
+  let uploadMode = "text";
 
   // Jika melampirkan media foto atau video
   if (file) {
@@ -1090,33 +1207,41 @@ $("postForm")?.addEventListener("submit", async event => {
       return;
     }
 
-    // Cek apakah Cloudinary sudah dikonfigurasi
-    if (!CLOUDINARY_CONFIG.cloudName || !CLOUDINARY_CONFIG.uploadPreset) {
-      openModal("cloudinaryGuideModal");
-      showToast("Layanan Cloudinary belum dikonfigurasi di firebase.js. Anda tetap bisa membuat postingan teks dengan menghapus pilihan media.", "info");
-      return;
-    }
-
     isSubmittingPost = true;
     if (uploadBtn) uploadBtn.disabled = true;
     if (spinner) spinner.hidden = false;
     if (progressBox) progressBox.hidden = false;
     if (progressBar) progressBar.style.width = "0%";
-    if (progressText) progressText.textContent = "Mengunggah media: 0%";
+    if (progressText) progressText.textContent = hasCloudinaryConfig()
+      ? "Mengunggah media: 0%"
+      : "Mengompresi foto: 0%";
 
     try {
-      const uploaded = await uploadToCloudinary(file, percent => {
-        if (progressBar) progressBar.style.width = `${percent}%`;
-        if (progressText) progressText.textContent = `Mengunggah media: ${percent}%`;
+      const uploaded = await uploadMediaAsset(file, {
+        isProfilePhoto: false,
+        onProgress: percent => {
+          if (progressBar) progressBar.style.width = `${percent}%`;
+          if (progressText) {
+            progressText.textContent = hasCloudinaryConfig()
+              ? `Mengunggah media: ${percent}%`
+              : `Memproses foto: ${percent}%`;
+          }
+        }
       });
 
-      mediaUrl = uploaded.secureUrl;
+      mediaUrl = uploaded.url;
       mediaPublicId = uploaded.publicId;
-      mediaPath = ""; // Wajib string kosong untuk postingan Cloudinary
-      mediaType = uploaded.resourceType;
+      mediaPath = "";
+      mediaType = uploaded.mediaType;
+      uploadMode = uploaded.mode;
     } catch (uploadErr) {
       console.error("Upload media error detail:", uploadErr);
-      showToast(`Gagal mengunggah media: ${uploadErr.message}`, "error");
+      if (uploadErr.message === "VIDEO_REQUIRES_CLOUDINARY") {
+        openModal("cloudinaryGuideModal");
+        showToast("Upload video membutuhkan Cloudinary di firebase.js (gratis). Untuk posting foto, bisa langsung upload tanpa Cloudinary!", "info");
+      } else {
+        showToast(`Gagal mengunggah media: ${uploadErr.message}`, "error");
+      }
       isSubmittingPost = false;
       if (uploadBtn) uploadBtn.disabled = false;
       if (spinner) spinner.hidden = true;
@@ -1161,7 +1286,12 @@ $("postForm")?.addEventListener("submit", async event => {
     $("mediaPreviewBox").hidden = true;
     if (progressBox) progressBox.hidden = true;
 
-    showToast(mediaUrl ? "Momen Anda berhasil diposting!" : "Postingan teks berhasil dibuat!", "success");
+    showToast(
+      mediaUrl
+        ? (uploadMode === "firestore" ? "Foto berhasil dikompresi & diposting!" : "Momen Anda berhasil diposting!")
+        : "Postingan teks berhasil dibuat!",
+      "success"
+    );
   } catch (postErr) {
     console.error("Save post error detail:", postErr.code, postErr.message, postErr);
     showToast("Postingan gagal disimpan: " + (postErr.code ? `[${postErr.code}] ` : "") + postErr.message, "error");
@@ -1215,11 +1345,13 @@ async function fetchAndCacheUserProfile(uid) {
     if (userDocSnap.exists()) {
       const data = userDocSnap.data();
       userProfilesCache.set(uid, data);
-      if (data.photoURL) {
+      if (isSafeMediaUrl(data.photoURL)) {
         // Perbarui semua avatar pada postingan milik author ini yang sudah ter-render di feed
+        const authorName = data.username || "Pengguna";
+        const authorInitial = authorName.charAt(0).toUpperCase();
         const avatars = document.querySelectorAll(`.post-author-avatar[data-author-uid="${uid}"]`);
         avatars.forEach(el => {
-          el.innerHTML = `<img src="${data.photoURL}" alt="${safeText(data.username || 'Pengguna')}" class="avatar-photo-img" loading="lazy">`;
+          renderAvatarElement(el, data.photoURL, authorInitial, authorName);
         });
       }
     } else {
@@ -1259,8 +1391,8 @@ function createPostCardElement(post, options = {}) {
     ? currentProfile
     : userProfilesCache.get(post.uid);
 
-  if (cachedAuthor && cachedAuthor.photoURL) {
-    avatarEl.innerHTML = `<img src="${cachedAuthor.photoURL}" alt="${authorUsername}" class="avatar-photo-img" loading="lazy">`;
+  if (cachedAuthor && isSafeMediaUrl(cachedAuthor.photoURL)) {
+    renderAvatarElement(avatarEl, cachedAuthor.photoURL, authorInitial, authorUsername);
   } else {
     avatarEl.textContent = authorInitial;
     if (post.uid && !userProfilesCache.has(post.uid)) {
@@ -1283,28 +1415,32 @@ function createPostCardElement(post, options = {}) {
   card.append(header);
 
   // Media Postingan (Foto atau Video)
-  if (post.mediaUrl && (post.mediaUrl.startsWith("http://") || post.mediaUrl.startsWith("https://"))) {
-    const mediaContainer = document.createElement("div");
-    mediaContainer.className = "post-media-container";
+  if (isSafeMediaUrl(post.mediaUrl)) {
+    const mediaUrlTrimmed = post.mediaUrl.trim();
+    const isHttpMedia = mediaUrlTrimmed.startsWith("http://") || mediaUrlTrimmed.startsWith("https://");
 
-    if (post.mediaType === "video") {
+    if (post.mediaType === "video" && isHttpMedia) {
+      const mediaContainer = document.createElement("div");
+      mediaContainer.className = "post-media-container";
       const video = document.createElement("video");
       video.className = "post-media";
-      video.src = post.mediaUrl;
+      video.src = mediaUrlTrimmed;
       video.controls = true;
       video.preload = "metadata";
       video.playsInline = true;
       mediaContainer.append(video);
+      card.append(mediaContainer);
     } else if (post.mediaType === "image") {
+      const mediaContainer = document.createElement("div");
+      mediaContainer.className = "post-media-container";
       const img = document.createElement("img");
       img.className = "post-media";
-      img.src = post.mediaUrl;
+      img.src = mediaUrlTrimmed;
       img.alt = "Foto postingan";
       img.loading = "lazy";
       mediaContainer.append(img);
+      card.append(mediaContainer);
     }
-
-    card.append(mediaContainer);
   }
 
   // Caption Postingan (dengan parser mention @username)

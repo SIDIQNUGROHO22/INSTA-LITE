@@ -2,14 +2,272 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper: Cek apakah pengguna telah login
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {uid} (matches Firebase Auth UID)
+    // Fields:
+    //   - email: string (required, immutable, == request.auth.token.email, 1..320 chars)
+    //   - username: string (required, matches ^[a-zA-Z0-9_.]{3,30}$)
+    //   - bio: string (required, <= 500 chars)
+    //   - photoURL: string (optional, '' OR Cloudinary image URL <= 1000 chars OR compressed raster Data URL <= 85000 chars)
+    //   - photoPublicId: string (optional, <= 200 chars)
+    //   - createdAt: timestamp (required, immutable)
+    //
+    // Subcollection: users/{uid}/bookmarks/{postId}
+    // Document ID: {postId}
+    // Fields:
+    //   - postId: string (required, == document ID, 1..128 chars)
+    //   - createdAt: timestamp (required)
+    //
+    // Subcollection: users/{uid}/hiddenPosts/{postId}
+    // Document ID: {postId}
+    // Fields:
+    //   - postId: string (required, == document ID, 1..128 chars)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: posts
+    // Document ID: {postId} (auto-generated)
+    // Fields:
+    //   - uid: string (required, immutable, == request.auth.uid on create)
+    //   - username: string (required, matches ^[a-zA-Z0-9_.]{3,30}$ and equals users/{uid}.username)
+    //   - caption: string (required, immutable, <= 2200 chars)
+    //   - mediaUrl: string (required, immutable; '' for text, Cloudinary URL <= 1000 for image/video, or compressed raster Data URL <= 700000 for image fallback)
+    //   - mediaPath: string (required, immutable, '' on create)
+    //   - mediaPublicId: string (required, immutable; '' for text/Data URL fallback, 1..200 chars for Cloudinary)
+    //   - mediaType: string (required, immutable, in ['text', 'image', 'video'])
+    //   - createdAt: timestamp (required, immutable)
+    //
+    // Subcollection: posts/{postId}/likes/{uid}
+    // Document ID: {uid} (matches liker Auth UID)
+    // Fields:
+    //   - uid: string (required, immutable, == request.auth.uid)
+    //   - createdAt: timestamp (required)
+    //
+    // Subcollection: posts/{postId}/comments/{commentId}
+    // Document ID: {commentId} (auto-generated)
+    // Fields:
+    //   - uid: string (required, immutable, == request.auth.uid)
+    //   - username: string (required, matches ^[a-zA-Z0-9_.]{3,30}$)
+    //   - photoURL: string (required, '' OR Cloudinary image URL <= 1000 chars OR compressed raster Data URL <= 85000 chars)
+    //   - text: string (required, 1..500 chars)
+    //   - createdAt: timestamp (required, immutable)
+    //
+    // Collection: notifications
+    // Document ID: {notificationId} (auto-generated)
+    // Fields:
+    //   - recipientUid: string (required, immutable, 1..128 chars, != request.auth.uid on create)
+    //   - senderUid: string (required, immutable, == request.auth.uid on create, 1..128 chars)
+    //   - senderUsername: string (required, immutable, matches ^[a-zA-Z0-9_.]{3,30}$)
+    //   - type: string (required, immutable, in ['like', 'comment', 'mention'])
+    //   - postId: string (required, immutable, <= 128 chars)
+    //   - commentId: string (required, immutable, <= 128 chars)
+    //   - message: string (required, immutable, <= 500 chars)
+    //   - read: bool (required, false on create; recipient may update)
+    //   - createdAt: timestamp (required, immutable)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Cek apakah pengguna telah login
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // Helper: Cek apakah pengguna adalah pemilik dokumen
+    // Cek apakah pengguna adalah pemilik dokumen berdasarkan UID pada path
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Pastikan field uid belum dimanipulasi saat pembuatan dokumen
+    function uidUnchanged() {
+      return !('uid' in request.resource.data)
+        || request.resource.data.uid == request.auth.uid;
+    }
+
+    // Pastikan field uid tidak berubah saat pembaruan dokumen
+    function uidNotModified() {
+      return !('uid' in request.resource.data)
+        || request.resource.data.uid == resource.data.uid;
+    }
+
+    // Validasi seluruh field wajib tersedia pada data dokumen
+    function hasRequiredFields(data, fields) {
+      return data.keys().hasAll(fields);
+    }
+
+    // Validasi dokumen tidak mengandung field tambahan di luar skema
+    function hasOnlyAllowedFields(data, fields) {
+      return data.keys().hasOnly(fields);
+    }
+
+    // Pastikan field immutable tidak dimodifikasi pada operasi update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Validasi format username standar (3-30 karakter: huruf, angka, titik, underscore)
+    function isValidUsername(username) {
+      return username is string
+        && username.matches('^[a-zA-Z0-9_.]{3,30}$');
+    }
+
+    // Validasi URL gambar HTTPS Cloudinary (maksimal 1000 karakter)
+    function isValidCloudinaryImageUrl(url) {
+      return url is string
+        && url.size() <= 1000
+        && url.matches('^https://res\\.cloudinary\\.com/.*/image/upload/.*');
+    }
+
+    // Validasi URL video HTTPS Cloudinary (maksimal 1000 karakter)
+    function isValidCloudinaryVideoUrl(url) {
+      return url is string
+        && url.size() <= 1000
+        && url.matches('^https://res\\.cloudinary\\.com/.*/video/upload/.*');
+    }
+
+    // Validasi Data URL gambar raster terkompresi (hanya JPEG/PNG/WebP base64; blokir SVG/XSS)
+    function isValidCompressedImageDataUrl(url, maxSize) {
+      return url is string
+        && url.size() <= maxSize
+        && url.matches('^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$');
+    }
+
+    // Validasi URL avatar pengguna/komentar (string kosong, Cloudinary image, atau Data URL <= 85000)
+    function isValidAvatarUrl(url) {
+      return url is string && (
+        url == ''
+        || isValidCloudinaryImageUrl(url)
+        || isValidCompressedImageDataUrl(url, 85000)
+      );
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasRequiredFields(data, ['email', 'username', 'bio', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['email', 'username', 'bio', 'createdAt', 'photoURL', 'photoPublicId'])
+        && data.email is string
+        && data.email.size() > 0
+        && data.email.size() <= 320
+        && isValidUsername(data.username)
+        && data.bio is string
+        && data.bio.size() <= 500
+        && (!('photoURL' in data) || isValidAvatarUrl(data.photoURL))
+        && (!('photoPublicId' in data) || (data.photoPublicId is string && data.photoPublicId.size() <= 200))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidUserPostRef(data, postId) {
+      return hasRequiredFields(data, ['postId', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['postId', 'createdAt'])
+        && data.postId is string
+        && data.postId.size() > 0
+        && data.postId.size() <= 128
+        && data.postId == postId
+        && data.createdAt is timestamp;
+    }
+
+    function isValidPostMedia(data) {
+      return data.mediaUrl is string
+        && data.mediaPath is string
+        && data.mediaPublicId is string
+        && data.mediaType in ['text', 'image', 'video']
+        && (
+          (data.mediaType == 'text'
+            && data.mediaUrl == ''
+            && data.mediaPath == ''
+            && data.mediaPublicId == '')
+          || (data.mediaType == 'image'
+            && data.mediaPath == ''
+            && (
+              (isValidCloudinaryImageUrl(data.mediaUrl)
+                && data.mediaPublicId.size() > 0
+                && data.mediaPublicId.size() <= 200)
+              || (isValidCompressedImageDataUrl(data.mediaUrl, 700000)
+                && data.mediaPublicId == '')
+            ))
+          || (data.mediaType == 'video'
+            && isValidCloudinaryVideoUrl(data.mediaUrl)
+            && data.mediaPublicId.size() > 0
+            && data.mediaPublicId.size() <= 200
+            && data.mediaPath == '')
+        );
+    }
+
+    function isValidPostCreate(data) {
+      return hasRequiredFields(data, ['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
+        && data.uid is string
+        && data.uid == request.auth.uid
+        && isValidUsername(data.username)
+        && data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username
+        && data.caption is string
+        && data.caption.size() <= 2200
+        && isValidPostMedia(data)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidPostUpdate(data, existingData) {
+      return data.diff(existingData).affectedKeys().hasOnly(['username'])
+        && data.uid is string
+        && data.uid == existingData.uid
+        && isValidUsername(data.username)
+        && data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username;
+    }
+
+    function isValidLike(data) {
+      return hasRequiredFields(data, ['uid', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['uid', 'createdAt'])
+        && data.uid is string
+        && data.uid == request.auth.uid
+        && data.createdAt is timestamp;
+    }
+
+    function isValidComment(data) {
+      return hasRequiredFields(data, ['uid', 'username', 'photoURL', 'text', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['uid', 'username', 'photoURL', 'text', 'createdAt'])
+        && data.uid is string
+        && data.uid == request.auth.uid
+        && isValidUsername(data.username)
+        && isValidAvatarUrl(data.photoURL)
+        && data.text is string
+        && data.text.size() > 0
+        && data.text.size() <= 500
+        && data.createdAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return hasRequiredFields(data, ['recipientUid', 'senderUid', 'senderUsername', 'type', 'postId', 'commentId', 'message', 'read', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['recipientUid', 'senderUid', 'senderUsername', 'type', 'postId', 'commentId', 'message', 'read', 'createdAt'])
+        && data.recipientUid is string
+        && data.recipientUid.size() > 0
+        && data.recipientUid.size() <= 128
+        && data.senderUid is string
+        && data.senderUid.size() > 0
+        && data.senderUid.size() <= 128
+        && isValidUsername(data.senderUsername)
+        && data.type in ['like', 'comment', 'mention']
+        && data.postId is string
+        && data.postId.size() <= 128
+        && data.commentId is string
+        && data.commentId.size() <= 128
+        && data.message is string
+        && data.message.size() <= 500
+        && data.read is bool
+        && data.createdAt is timestamp;
+    }
+
+    // Default deny untuk semua jalur koleksi lain yang tidak didefinisikan secara eksplisit
+    match /{document=**} {
+      allow read, write: if false;
     }
 
     // ==========================================
@@ -24,34 +282,18 @@ service cloud.firestore {
       // - Wajib memiliki field: email, username, bio, createdAt
       // - Opsional field: photoURL, photoPublicId
       // - Email harus sama dengan email autentikasi Firebase
-      // - Username 3–30 karakter (huruf, angka, titik, underscore)
-      // - Bio maksimal 500 karakter
-      // - createdAt wajib bertipe timestamp
       allow create: if isOwner(uid)
-        && request.resource.data.keys().hasAll(['email', 'username', 'bio', 'createdAt'])
-        && request.resource.data.keys().hasOnly(['email', 'username', 'bio', 'createdAt', 'photoURL', 'photoPublicId'])
-        && request.resource.data.email is string
-        && request.resource.data.email == request.auth.token.email
-        && request.resource.data.username is string
-        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
-        && request.resource.data.bio is string
-        && request.resource.data.bio.size() <= 500
-        && (!('photoURL' in request.resource.data) || (request.resource.data.photoURL is string && request.resource.data.photoURL.size() <= 1000))
-        && (!('photoPublicId' in request.resource.data) || (request.resource.data.photoPublicId is string && request.resource.data.photoPublicId.size() <= 200))
-        && request.resource.data.createdAt is timestamp;
+        && isValidUser(request.resource.data)
+        && request.resource.data.email == request.auth.token.email;
 
       // Pembaruan profil:
       // - Hanya boleh mengubah field username, bio, photoURL, dan photoPublicId oleh pemilik akun
       // - Field email, createdAt, dan UID tidak boleh diganti
-      // - Format username, bio, dan photo tetap divalidasi ketat
+      // - photoURL divalidasi dengan isValidAvatarUrl() (kosong, Cloudinary image, atau Data URL <= 85KB)
       allow update: if isOwner(uid)
+        && isValidUser(request.resource.data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['username', 'bio', 'photoURL', 'photoPublicId'])
-        && request.resource.data.username is string
-        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
-        && request.resource.data.bio is string
-        && request.resource.data.bio.size() <= 500
-        && (!('photoURL' in request.resource.data) || (request.resource.data.photoURL is string && request.resource.data.photoURL.size() <= 1000))
-        && (!('photoPublicId' in request.resource.data) || (request.resource.data.photoPublicId is string && request.resource.data.photoPublicId.size() <= 200));
+        && areImmutableFieldsUnchanged(['email', 'createdAt']);
 
       // Penghapusan profil: hanya boleh dilakukan pemilik akun sendiri
       allow delete: if isOwner(uid);
@@ -65,11 +307,7 @@ service cloud.firestore {
 
         // Menambah atau memperbarui bookmark: hanya pemilik akun, wajib menyimpan postId dan createdAt
         allow create, update: if isOwner(uid)
-          && request.resource.data.keys().hasAll(['postId', 'createdAt'])
-          && request.resource.data.keys().hasOnly(['postId', 'createdAt'])
-          && request.resource.data.postId is string
-          && request.resource.data.postId == postId
-          && request.resource.data.createdAt is timestamp;
+          && isValidUserPostRef(request.resource.data, postId);
 
         // Membatalkan bookmark: hanya pemilik akun
         allow delete: if isOwner(uid);
@@ -84,11 +322,7 @@ service cloud.firestore {
 
         // Menyembunyikan atau memperbarui postingan tersembunyi: hanya pemilik akun
         allow create, update: if isOwner(uid)
-          && request.resource.data.keys().hasAll(['postId', 'createdAt'])
-          && request.resource.data.keys().hasOnly(['postId', 'createdAt'])
-          && request.resource.data.postId is string
-          && request.resource.data.postId == postId
-          && request.resource.data.createdAt is timestamp;
+          && isValidUserPostRef(request.resource.data, postId);
 
         // Mengembalikan postingan yang disembunyikan: hanya pemilik akun
         allow delete: if isOwner(uid);
@@ -103,59 +337,21 @@ service cloud.firestore {
       allow read: if isAuthenticated();
 
       // Pembuatan postingan:
-      // - Hanya untuk UID sendiri
-      // - Wajib memiliki semua field: uid, username, caption, mediaUrl, mediaPath, mediaPublicId, mediaType, createdAt
-      // - Tidak boleh ada field tambahan
-      // - Username postingan wajib sama dengan username profil pembuatnya di Firestore
-      // - Caption string maksimal 2200 karakter
-      // - mediaUrl, mediaPath, mediaPublicId wajib bertipe string
-      // - mediaType hanya 'text', 'image', atau 'video'
-      // - Postingan text: mediaUrl, mediaPath, mediaPublicId wajib string kosong
-      // - Postingan image: wajib URL HTTPS Cloudinary berformat image, mediaPublicId 1-200 karakter, mediaPath string kosong
-      // - Postingan video: wajib URL HTTPS Cloudinary berformat video, mediaPublicId 1-200 karakter, mediaPath string kosong
-      // - createdAt wajib bertipe timestamp
+      // - Hanya untuk UID sendiri dengan username sinkron dengan dokumen profil Firestore
+      // - Mendukung teks, foto/video Cloudinary, dan foto terkompresi fallback Firestore (Data URL <= 700000)
       allow create: if isAuthenticated()
-        && request.resource.data.uid == request.auth.uid
-        && request.resource.data.keys().hasAll(['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
-        && request.resource.data.keys().hasOnly(['uid', 'username', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
-        && request.resource.data.username is string
-        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
-        && request.resource.data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username
-        && request.resource.data.caption is string
-        && request.resource.data.caption.size() <= 2200
-        && request.resource.data.mediaUrl is string
-        && request.resource.data.mediaPath is string
-        && request.resource.data.mediaPublicId is string
-        && request.resource.data.mediaType in ['text', 'image', 'video']
-        && (
-          request.resource.data.mediaType == 'text'
-            ? (request.resource.data.mediaUrl == '' && request.resource.data.mediaPath == '' && request.resource.data.mediaPublicId == '')
-            : (request.resource.data.mediaType == 'image'
-                ? (request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/.*/image/upload/.*')
-                    && request.resource.data.mediaPublicId.size() > 0
-                    && request.resource.data.mediaPublicId.size() <= 200
-                    && request.resource.data.mediaPath == '')
-                : (request.resource.data.mediaType == 'video'
-                    && request.resource.data.mediaUrl.matches('^https://res\\.cloudinary\\.com/.*/video/upload/.*')
-                    && request.resource.data.mediaPublicId.size() > 0
-                    && request.resource.data.mediaPublicId.size() <= 200
-                    && request.resource.data.mediaPath == '')
-              )
-        )
-        && request.resource.data.createdAt is timestamp;
+        && uidUnchanged()
+        && isValidPostCreate(request.resource.data);
 
       // Pembaruan postingan:
       // - Hanya boleh mengubah field username oleh pemilik postingan
       // - Username baru wajib sama dengan username profil pemilik yang sudah diperbarui di Firestore
-      // - UID dan field lainnya tidak boleh berubah
-      // - Sesuai dengan alur aplikasi: update profil dahulu, lalu batch update postingan
+      // - UID, createdAt, caption, dan field media tidak boleh berubah
       allow update: if isAuthenticated()
         && resource.data.uid == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['username'])
-        && request.resource.data.username is string
-        && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
-        && request.resource.data.username == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username
-        && request.resource.data.uid == resource.data.uid;
+        && uidNotModified()
+        && areImmutableFieldsUnchanged(['uid', 'caption', 'mediaUrl', 'mediaPath', 'mediaPublicId', 'mediaType', 'createdAt'])
+        && isValidPostUpdate(request.resource.data, resource.data);
 
       // Penghapusan postingan: hanya oleh pemilik postingan
       allow delete: if isAuthenticated()
@@ -171,12 +367,14 @@ service cloud.firestore {
         // Memberikan Like:
         // - Hanya boleh menggunakan ID dokumen sama dengan UID pengirim (mencegah like ganda)
         // - Mengizinkan create & update (upsert aman via setDoc)
-        // - Wajib menyertakan uid dan createdAt bertipe timestamp
-        allow create, update: if isOwner(uid)
-          && request.resource.data.keys().hasAll(['uid', 'createdAt'])
-          && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
-          && request.resource.data.uid == request.auth.uid
-          && request.resource.data.createdAt is timestamp;
+        allow create: if isOwner(uid)
+          && uidUnchanged()
+          && isValidLike(request.resource.data);
+
+        allow update: if isOwner(uid)
+          && uidNotModified()
+          && areImmutableFieldsUnchanged(['uid'])
+          && isValidLike(request.resource.data);
 
         // Membatalkan Like: hanya pemilik Like yang bersangkutan
         allow delete: if isOwner(uid);
@@ -189,25 +387,17 @@ service cloud.firestore {
         // Setiap pengguna terautentikasi dapat membaca komentar pada postingan
         allow read: if isAuthenticated();
 
-        // Menambahkan atau memperbarui komentar:
-        // - Pengguna terautentikasi
-        // - UID komentar wajib milik pengirim
-        // - Field wajib: uid, username, photoURL, text, createdAt
-        // - Teks komentar minimal 1 karakter dan maksimal 500 karakter
-        // - photoURL string hingga 1000 karakter
-        // - createdAt bertipe timestamp
-        allow create, update: if isAuthenticated()
-          && request.resource.data.uid == request.auth.uid
-          && request.resource.data.keys().hasAll(['uid', 'username', 'photoURL', 'text', 'createdAt'])
-          && request.resource.data.keys().hasOnly(['uid', 'username', 'photoURL', 'text', 'createdAt'])
-          && request.resource.data.username is string
-          && request.resource.data.username.matches('^[a-zA-Z0-9_.]{3,30}$')
-          && request.resource.data.photoURL is string
-          && request.resource.data.photoURL.size() <= 1000
-          && request.resource.data.text is string
-          && request.resource.data.text.size() > 0
-          && request.resource.data.text.size() <= 500
-          && request.resource.data.createdAt is timestamp;
+        // Menambahkan atau memperbarui komentar milik sendiri:
+        // - photoURL divalidasi dengan isValidAvatarUrl() (kosong, Cloudinary image, atau Data URL <= 85KB)
+        allow create: if isAuthenticated()
+          && uidUnchanged()
+          && isValidComment(request.resource.data);
+
+        allow update: if isAuthenticated()
+          && resource.data.uid == request.auth.uid
+          && uidNotModified()
+          && areImmutableFieldsUnchanged(['uid', 'createdAt'])
+          && isValidComment(request.resource.data);
 
         // Menghapus komentar: hanya pemilik komentar yang bersangkutan
         allow delete: if isAuthenticated()
@@ -227,31 +417,20 @@ service cloud.firestore {
       // - Pengirim harus pengguna terautentikasi (senderUid == request.auth.uid)
       // - Tidak boleh mengirim notifikasi ke diri sendiri (recipientUid != request.auth.uid)
       // - Status read wajib bernilai false saat dibuat
-      // - Jenis notifikasi valid: 'like', 'comment', 'mention'
-      // - Teks pesan maksimal 500 karakter
-      // - createdAt bertipe timestamp
       allow create: if isAuthenticated()
+        && isValidNotification(request.resource.data)
         && request.resource.data.senderUid == request.auth.uid
         && request.resource.data.recipientUid != request.auth.uid
-        && request.resource.data.keys().hasAll(['recipientUid', 'senderUid', 'senderUsername', 'type', 'postId', 'commentId', 'message', 'read', 'createdAt'])
-        && request.resource.data.keys().hasOnly(['recipientUid', 'senderUid', 'senderUsername', 'type', 'postId', 'commentId', 'message', 'read', 'createdAt'])
-        && request.resource.data.recipientUid is string
-        && request.resource.data.senderUsername is string
-        && request.resource.data.type in ['like', 'comment', 'mention']
-        && request.resource.data.postId is string
-        && request.resource.data.commentId is string
-        && request.resource.data.message is string
-        && request.resource.data.message.size() <= 500
-        && request.resource.data.read == false
-        && request.resource.data.createdAt is timestamp;
+        && request.resource.data.read == false;
 
       // Memperbarui notifikasi (menandai sudah dibaca):
       // - Hanya penerima notifikasi yang berhak mengubah
       // - Hanya field 'read' yang boleh diperbarui
       allow update: if isAuthenticated()
         && resource.data.recipientUid == request.auth.uid
+        && isValidNotification(request.resource.data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
-        && request.resource.data.read is bool;
+        && areImmutableFieldsUnchanged(['recipientUid', 'senderUid', 'senderUsername', 'type', 'postId', 'commentId', 'message', 'createdAt']);
 
       // Menghapus notifikasi: hanya oleh penerima notifikasi
       allow delete: if isAuthenticated()
