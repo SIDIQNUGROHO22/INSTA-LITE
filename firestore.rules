@@ -114,6 +114,8 @@ service cloud.firestore {
     // Validasi format username standar (3-30 karakter: huruf, angka, titik, underscore)
     function isValidUsername(username) {
       return username is string
+        && username.size() >= 3
+        && username.size() <= 30
         && username.matches('^[a-zA-Z0-9_.]{3,30}$');
     }
 
@@ -131,11 +133,16 @@ service cloud.firestore {
         && url.matches('^https://res\\.cloudinary\\.com/.*/video/upload/.*');
     }
 
-    // Validasi Data URL gambar raster terkompresi (hanya JPEG/PNG/WebP base64; blokir SVG/XSS)
+    // Validasi Data URL gambar raster terkompresi (O(1) prefix slicing agar aman dari batas RE2 Firestore; blokir SVG/XSS)
     function isValidCompressedImageDataUrl(url, maxSize) {
       return url is string
+        && url.size() > 23
         && url.size() <= maxSize
-        && url.matches('^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$');
+        && (
+          url[0:23] == 'data:image/jpeg;base64,'
+          || url[0:23] == 'data:image/webp;base64,'
+          || url[0:22] == 'data:image/png;base64,'
+        );
     }
 
     // Validasi URL avatar pengguna/komentar (string kosong, Cloudinary image, atau Data URL <= 85000)
