@@ -7,8 +7,8 @@ import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 // 3. Buka Project Settings -> API, lalu tempel Project URL dan anon/publishable key di bawah:
 // ============================================================================
 export const SUPABASE_CONFIG = {
-  url: "",            // Contoh: "https://abcdefghijklmno.supabase.co"
-  anonKey: "",        // Contoh: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  url: "https://okwgrsecxdcvzmvpodto.supabase.co",
+  anonKey: "sb_publishable_WPj4MqgmKEyhbP5Zh9ywLg_iWDTc2zc",
   storageBucket: "instalite-media"
 };
 
