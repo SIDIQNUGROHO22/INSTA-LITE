@@ -13,7 +13,7 @@ import {
 import {
   doc, getDoc, setDoc, updateDoc, deleteDoc,
   collection, query, orderBy, onSnapshot,
-  where, getDocs, serverTimestamp, writeBatch
+  where, getDocs, limit, serverTimestamp, writeBatch
 } from "https://www.gstatic.com/firebasejs/12.5.0/firebase-firestore.js";
 
 import {
@@ -43,13 +43,18 @@ let rawFeedPosts = [];
 const userProfilesCache = new Map();
 let feedSearchKeyword = "";
 let feedSortCriteria = "newest";
+let feedScopeFilter = "all"; // "all" | "following" | "mutual"
 
-// State Tahap 2: Interaksi Sosial, Notifikasi, Bookmark, & Hide
+// State Tahap 2: Interaksi Sosial, Notifikasi, Bookmark, Hide, & Mutualan
 let activeProfileTab = "my"; // "my" | "saved" | "hidden"
 let userBookmarksSet = new Set();
 let userHiddenPostsSet = new Set();
+let userFollowingSet = new Set();
+let userFollowersSet = new Set();
 let unsubscribeBookmarks = null;
 let unsubscribeHiddenPosts = null;
+let unsubscribeFollowing = null;
+let unsubscribeFollowers = null;
 let rawNotifications = [];
 let unsubscribeNotifications = null;
 let activeCommentPost = null;
@@ -60,6 +65,9 @@ const postSubcollectionUnsubscribers = new Map();
 const likingPostsSet = new Set();
 const bookmarkingPostsSet = new Set();
 const hidingPostsSet = new Set();
+const followingInFlightSet = new Set();
+let activeConnectionsTab = "mutual";
+let previewedProfileUid = "";
 
 // Batasan format foto profil
 const ALLOWED_PROFILE_PHOTO = {
@@ -680,6 +688,8 @@ $("authForm")?.addEventListener("submit", async event => {
       listenToNotifications();
       listenToUserBookmarks();
       listenToUserHiddenPosts();
+      listenToUserFollowing();
+      listenToUserFollowers();
     } else {
       await signInWithEmailAndPassword(auth, email, password);
       showToast("Berhasil masuk. Selamat datang kembali!", "success");
@@ -709,10 +719,15 @@ onAuthStateChanged(auth, async user => {
     if (unsubscribeNotifications) { unsubscribeNotifications(); unsubscribeNotifications = null; }
     if (unsubscribeBookmarks) { unsubscribeBookmarks(); unsubscribeBookmarks = null; }
     if (unsubscribeHiddenPosts) { unsubscribeHiddenPosts(); unsubscribeHiddenPosts = null; }
+    if (unsubscribeFollowing) { unsubscribeFollowing(); unsubscribeFollowing = null; }
+    if (unsubscribeFollowers) { unsubscribeFollowers(); unsubscribeFollowers = null; }
     if (unsubscribeActivePostComments) { unsubscribeActivePostComments(); unsubscribeActivePostComments = null; }
     cleanupPostSubcollectionListeners();
     userBookmarksSet.clear();
     userHiddenPostsSet.clear();
+    userFollowingSet.clear();
+    userFollowersSet.clear();
+    updateProfileSocialCounters();
     rawNotifications = [];
     postLikesCache.clear();
     postCommentsCache.clear();
@@ -726,6 +741,12 @@ onAuthStateChanged(auth, async user => {
     rawFeedPosts = [];
     feedSearchKeyword = "";
     feedSortCriteria = "newest";
+    feedScopeFilter = "all";
+    document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+      const isAll = btn.dataset.feedScope === "all";
+      btn.classList.toggle("is-active", isAll);
+      btn.setAttribute("aria-selected", isAll ? "true" : "false");
+    });
     $("navUserMenu").hidden = true;
     $("appSection").hidden = true;
     $("authSection").hidden = false;
@@ -769,6 +790,8 @@ onAuthStateChanged(auth, async user => {
     listenToNotifications();
     listenToUserBookmarks();
     listenToUserHiddenPosts();
+    listenToUserFollowing();
+    listenToUserFollowers();
   } catch (error) {
     console.error("Load profile error detail:", error.code, error.message, error);
     showToast("Gagal memuat profil: " + (error.code ? `[${error.code}] ` : "") + "Pastikan firestore.rules sudah di-Publish di Firebase Console.", "error");
@@ -1412,6 +1435,17 @@ function createPostCardElement(post, options = {}) {
 
   authorBox.append(avatarEl, nameTimeBox);
   header.append(authorBox);
+
+  if (currentUser && post.uid && post.uid !== currentUser.uid) {
+    const followBtn = document.createElement("button");
+    followBtn.className = "btn-follow-pill";
+    followBtn.type = "button";
+    followBtn.dataset.targetUid = post.uid;
+    applyFollowButtonUI(followBtn, post.uid);
+    followBtn.addEventListener("click", () => toggleFollowUser(post.uid, authorUsername));
+    header.append(followBtn);
+  }
+
   card.append(header);
 
   // Media Postingan (Foto atau Video)
@@ -1602,6 +1636,13 @@ function renderFilteredFeed() {
   // 1. Saring postingan yang disembunyikan oleh pengguna saat ini
   let filtered = rawFeedPosts.filter(post => !userHiddenPostsSet.has(post.id));
 
+  // 1b. Saring berdasarkan ruang lingkup feed (Semua, Mengikuti, Mutualan)
+  if (feedScopeFilter === "following") {
+    filtered = filtered.filter(post => post.uid === currentUser?.uid || userFollowingSet.has(post.uid));
+  } else if (feedScopeFilter === "mutual") {
+    filtered = filtered.filter(post => userFollowingSet.has(post.uid) && userFollowersSet.has(post.uid));
+  }
+
   // 2. Saring berdasarkan kata kunci (username atau caption)
   const keyword = (feedSearchKeyword || "").trim().toLowerCase();
   if (keyword.length > 0) {
@@ -1644,8 +1685,8 @@ function renderFilteredFeed() {
     }
   });
 
-  // 4. Tampilkan status bar filter jika ada pencarian atau pengurutan non-default
-  const hasActiveFilter = keyword.length > 0 || feedSortCriteria !== "newest";
+  // 4. Tampilkan status bar filter jika ada pencarian, filter ruang lingkup, atau pengurutan non-default
+  const hasActiveFilter = keyword.length > 0 || feedSortCriteria !== "newest" || feedScopeFilter !== "all";
   if (statusRow) {
     statusRow.hidden = !hasActiveFilter;
   }
@@ -1657,9 +1698,15 @@ function renderFilteredFeed() {
   if (filtered.length === 0) {
     if (emptySearchFeed) emptySearchFeed.hidden = false;
     if (emptySearchText) {
-      emptySearchText.textContent = keyword
-        ? `Tidak ada postingan yang cocok dengan kata kunci "${safeText(feedSearchKeyword)}".`
-        : "Tidak ada postingan yang sesuai dengan filter yang Anda pilih.";
+      if (keyword) {
+        emptySearchText.textContent = `Tidak ada postingan yang cocok dengan kata kunci "${safeText(feedSearchKeyword)}".`;
+      } else if (feedScopeFilter === "following") {
+        emptySearchText.textContent = "Belum ada postingan dari akun yang Anda ikuti. Coba ikuti pengguna lain di feed atau lewat Cari & Mutualan.";
+      } else if (feedScopeFilter === "mutual") {
+        emptySearchText.textContent = "Belum ada postingan dari akun mutualan Anda. Saling ikuti dengan pengguna lain untuk melihat momen mereka di sini.";
+      } else {
+        emptySearchText.textContent = "Tidak ada postingan yang sesuai dengan filter yang Anda pilih.";
+      }
     }
     feed.replaceChildren();
     return;
@@ -1749,7 +1796,21 @@ $("feedSortSelect")?.addEventListener("change", event => {
   renderFilteredFeed();
 });
 
-// Reset Filter Pencarian & Pengurutan
+// Listener Filter Ruang Lingkup Feed (Semua / Mengikuti / Mutualan)
+document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const scope = btn.dataset.feedScope || "all";
+    feedScopeFilter = scope;
+    document.querySelectorAll(".feed-scope-btn").forEach(b => {
+      const active = b.dataset.feedScope === scope;
+      b.classList.toggle("is-active", active);
+      b.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    renderFilteredFeed();
+  });
+});
+
+// Reset Filter Pencarian, Ruang Lingkup & Pengurutan
 const handleResetFeedFilter = () => {
   const input = $("feedSearchInput");
   const select = $("feedSortSelect");
@@ -1757,6 +1818,12 @@ const handleResetFeedFilter = () => {
   if (select) select.value = "newest";
   feedSearchKeyword = "";
   feedSortCriteria = "newest";
+  feedScopeFilter = "all";
+  document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+    const isAll = btn.dataset.feedScope === "all";
+    btn.classList.toggle("is-active", isAll);
+    btn.setAttribute("aria-selected", isAll ? "true" : "false");
+  });
   const clearBtn = $("clearSearchBtn");
   if (clearBtn) clearBtn.hidden = true;
   renderFilteredFeed();
@@ -2408,12 +2475,31 @@ $("userPreviewViewPostsBtn")?.addEventListener("click", () => {
   closeModal("userPreviewModal");
   if (!targetUsername) return;
 
+  if (activeProfileTab !== "my") {
+    switchProfileTab("my");
+  }
+
   const searchInput = $("feedSearchInput");
   if (searchInput) searchInput.value = targetUsername;
   feedSearchKeyword = targetUsername;
+  feedScopeFilter = "all";
+  document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+    const isAll = btn.dataset.feedScope === "all";
+    btn.classList.toggle("is-active", isAll);
+    btn.setAttribute("aria-selected", isAll ? "true" : "false");
+  });
   renderFilteredFeed();
 
   $("feed")?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+$("userPreviewFollowBtn")?.addEventListener("click", () => {
+  const btn = $("userPreviewFollowBtn");
+  const targetUid = btn?.dataset.targetUid;
+  const targetUsername = btn?.dataset.targetUsername || previewedProfileUsername;
+  if (targetUid) {
+    toggleFollowUser(targetUid, targetUsername);
+  }
 });
 
 async function showUserProfilePreview(username) {
@@ -2432,16 +2518,54 @@ async function showUserProfilePreview(username) {
     const userUid = found.uid;
     const initial = (userData.username || "U").charAt(0).toUpperCase();
     previewedProfileUsername = userData.username || "";
+    previewedProfileUid = userUid;
 
     $("userPreviewTitle").textContent = `Profil @${userData.username}`;
     renderAvatarElement($("userPreviewAvatar"), userData.photoURL, initial, userData.username);
     $("userPreviewUsername").textContent = `@${userData.username}`;
     $("userPreviewBio").textContent = userData.bio || "Belum ada bio.";
 
-    // Hitung jumlah postingan pengguna ini
-    const postsQuery = query(collection(db, "posts"), where("uid", "==", userUid));
-    const postsSnap = await getDocs(postsQuery);
+    const [postsSnap, followersSnap, followingSnap] = await Promise.all([
+      getDocs(query(collection(db, "posts"), where("uid", "==", userUid))),
+      getDocs(collection(db, "users", userUid, "followers")),
+      getDocs(collection(db, "users", userUid, "following"))
+    ]);
+
     $("userPreviewPostsCount").textContent = `${postsSnap.size} Postingan`;
+    if ($("userPreviewFollowersCount")) {
+      $("userPreviewFollowersCount").textContent = `${followersSnap.size} Pengikut`;
+    }
+    if ($("userPreviewFollowingCount")) {
+      $("userPreviewFollowingCount").textContent = `${followingSnap.size} Mengikuti`;
+    }
+
+    const relationBadge = $("userPreviewRelationBadge");
+    const previewFollowBtn = $("userPreviewFollowBtn");
+    const isSelf = currentUser && userUid === currentUser.uid;
+
+    if (isSelf) {
+      if (relationBadge) relationBadge.hidden = true;
+      if (previewFollowBtn) previewFollowBtn.hidden = true;
+    } else {
+      const relation = getFollowRelation(userUid);
+      if (relationBadge) {
+        if (relation.isMutual) {
+          relationBadge.textContent = "Mutualan";
+          relationBadge.hidden = false;
+        } else if (relation.followsMe) {
+          relationBadge.textContent = "Mengikuti Anda";
+          relationBadge.hidden = false;
+        } else {
+          relationBadge.hidden = true;
+        }
+      }
+      if (previewFollowBtn) {
+        previewFollowBtn.hidden = false;
+        previewFollowBtn.dataset.targetUid = userUid;
+        previewFollowBtn.dataset.targetUsername = userData.username || "";
+        applyFollowButtonUI(previewFollowBtn, userUid);
+      }
+    }
 
     const viewPostsBtn = $("userPreviewViewPostsBtn");
     if (viewPostsBtn) {
@@ -2518,7 +2642,8 @@ function renderNotificationList() {
   const typeIcons = {
     like: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>`,
     comment: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>`,
-    mention: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94"></path></svg>`
+    mention: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94"></path></svg>`,
+    follow: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>`
   };
 
   rawNotifications.forEach(notif => {
@@ -2575,6 +2700,8 @@ function renderNotificationList() {
             setTimeout(() => openCommentModal(notif.postId), 400);
           }
         }, 300);
+      } else if (notif.type === "follow" && notif.senderUsername) {
+        setTimeout(() => showUserProfilePreview(notif.senderUsername), 220);
       }
     });
 
@@ -2854,4 +2981,373 @@ function renderProfileTabContent() {
 $("tabMyPostsBtn")?.addEventListener("click", () => switchProfileTab("my"));
 $("tabSavedPostsBtn")?.addEventListener("click", () => switchProfileTab("saved"));
 $("tabHiddenPostsBtn")?.addEventListener("click", () => switchProfileTab("hidden"));
+
+/* ==========================================================================
+   18. FITUR 7: FOLLOW, PENGIKUT, & MUTUALAN REAL-TIME
+   ========================================================================== */
+function getFollowRelation(targetUid) {
+  const isFollowing = Boolean(targetUid && userFollowingSet.has(targetUid));
+  const followsMe = Boolean(targetUid && userFollowersSet.has(targetUid));
+  return {
+    isFollowing,
+    followsMe,
+    isMutual: isFollowing && followsMe
+  };
+}
+
+function getFollowButtonConfig(relation) {
+  if (relation.isMutual) {
+    return { label: "Mutual", extraClass: "is-mutual", title: "Kalian saling mengikuti (klik untuk berhenti mengikuti)" };
+  }
+  if (relation.isFollowing) {
+    return { label: "Mengikuti", extraClass: "is-following", title: "Berhenti mengikuti" };
+  }
+  if (relation.followsMe) {
+    return { label: "Ikuti Balik", extraClass: "is-follow-back", title: "Pengguna ini mengikuti Anda — klik untuk mutualan" };
+  }
+  return { label: "+ Ikuti", extraClass: "", title: "Ikuti pengguna ini" };
+}
+
+function applyFollowButtonUI(btn, targetUid) {
+  if (!btn || !targetUid) return;
+  const relation = getFollowRelation(targetUid);
+  const { label, extraClass, title } = getFollowButtonConfig(relation);
+
+  btn.classList.remove("is-mutual", "is-following", "is-follow-back");
+  if (extraClass) btn.classList.add(extraClass);
+  btn.textContent = label;
+  btn.title = title;
+  btn.disabled = followingInFlightSet.has(targetUid);
+}
+
+function updateFollowButtonsInDom(targetUid) {
+  document.querySelectorAll(`.btn-follow-pill[data-target-uid="${targetUid}"]`).forEach(btn => {
+    applyFollowButtonUI(btn, targetUid);
+  });
+
+  const previewFollowBtn = $("userPreviewFollowBtn");
+  if (previewFollowBtn && !previewFollowBtn.hidden && previewFollowBtn.dataset.targetUid === targetUid) {
+    applyFollowButtonUI(previewFollowBtn, targetUid);
+    const relation = getFollowRelation(targetUid);
+    const relationBadge = $("userPreviewRelationBadge");
+    if (relationBadge) {
+      if (relation.isMutual) {
+        relationBadge.textContent = "Mutualan";
+        relationBadge.hidden = false;
+      } else if (relation.followsMe) {
+        relationBadge.textContent = "Mengikuti Anda";
+        relationBadge.hidden = false;
+      } else {
+        relationBadge.hidden = true;
+      }
+    }
+  }
+}
+
+function getMutualUidList() {
+  return Array.from(userFollowingSet).filter(uid => userFollowersSet.has(uid));
+}
+
+function updateProfileSocialCounters() {
+  const followersBtn = $("profileFollowersBtn");
+  const followingBtn = $("profileFollowingBtn");
+  const mutualBtn = $("profileMutualBtn");
+
+  if (followersBtn) followersBtn.textContent = `${userFollowersSet.size} Pengikut`;
+  if (followingBtn) followingBtn.textContent = `${userFollowingSet.size} Mengikuti`;
+  if (mutualBtn) mutualBtn.textContent = `${getMutualUidList().length} Mutual`;
+
+  const modal = $("connectionsModal");
+  if (modal && modal.classList.contains("is-open")) {
+    renderConnectionsList();
+  }
+}
+
+function listenToUserFollowing() {
+  if (unsubscribeFollowing) {
+    unsubscribeFollowing();
+    unsubscribeFollowing = null;
+  }
+  if (!currentUser) return;
+
+  const followingCol = collection(db, "users", currentUser.uid, "following");
+  unsubscribeFollowing = onSnapshot(followingCol, snapshot => {
+    userFollowingSet = new Set(snapshot.docs.map(d => d.id));
+    updateProfileSocialCounters();
+    document.querySelectorAll(".btn-follow-pill[data-target-uid]").forEach(btn => {
+      applyFollowButtonUI(btn, btn.dataset.targetUid);
+    });
+    if (feedScopeFilter !== "all") {
+      renderFilteredFeed();
+    }
+  }, err => {
+    console.warn("Following listener error:", err);
+  });
+}
+
+function listenToUserFollowers() {
+  if (unsubscribeFollowers) {
+    unsubscribeFollowers();
+    unsubscribeFollowers = null;
+  }
+  if (!currentUser) return;
+
+  const followersCol = collection(db, "users", currentUser.uid, "followers");
+  unsubscribeFollowers = onSnapshot(followersCol, snapshot => {
+    userFollowersSet = new Set(snapshot.docs.map(d => d.id));
+    updateProfileSocialCounters();
+    document.querySelectorAll(".btn-follow-pill[data-target-uid]").forEach(btn => {
+      applyFollowButtonUI(btn, btn.dataset.targetUid);
+    });
+    if (feedScopeFilter === "mutual") {
+      renderFilteredFeed();
+    }
+  }, err => {
+    console.warn("Followers listener error:", err);
+  });
+}
+
+async function toggleFollowUser(targetUid, targetUsername = "Pengguna") {
+  if (!currentUser || !currentProfile) {
+    showToast("Silakan masuk terlebih dahulu untuk mengikuti pengguna.", "warning");
+    return;
+  }
+  if (!targetUid || targetUid === currentUser.uid) return;
+  if (followingInFlightSet.has(targetUid)) return;
+
+  followingInFlightSet.add(targetUid);
+  const wasFollowing = userFollowingSet.has(targetUid);
+  const followsMe = userFollowersSet.has(targetUid);
+
+  if (wasFollowing) {
+    userFollowingSet.delete(targetUid);
+  } else {
+    userFollowingSet.add(targetUid);
+  }
+  updateFollowButtonsInDom(targetUid);
+  updateProfileSocialCounters();
+
+  const myFollowingRef = doc(db, "users", currentUser.uid, "following", targetUid);
+  const targetFollowerRef = doc(db, "users", targetUid, "followers", currentUser.uid);
+
+  try {
+    const batch = writeBatch(db);
+    if (wasFollowing) {
+      batch.delete(myFollowingRef);
+      batch.delete(targetFollowerRef);
+    } else {
+      batch.set(myFollowingRef, {
+        targetUid: targetUid,
+        createdAt: serverTimestamp()
+      });
+      batch.set(targetFollowerRef, {
+        uid: currentUser.uid,
+        createdAt: serverTimestamp()
+      });
+    }
+    await batch.commit();
+
+    if (wasFollowing) {
+      showToast(`Berhenti mengikuti @${targetUsername}.`, "info");
+    } else {
+      const becameMutual = followsMe;
+      showToast(
+        becameMutual
+          ? `Anda dan @${targetUsername} sekarang mutualan!`
+          : `Anda mulai mengikuti @${targetUsername}.`,
+        "success"
+      );
+
+      // Kirim notifikasi follow ke pengguna target
+      try {
+        const notifRef = doc(collection(db, "notifications"));
+        await setDoc(notifRef, {
+          recipientUid: targetUid,
+          senderUid: currentUser.uid,
+          senderUsername: currentProfile.username,
+          type: "follow",
+          postId: "",
+          commentId: "",
+          message: becameMutual
+            ? `${currentProfile.username} mengikuti Anda balik! Kalian sekarang mutualan.`
+            : `${currentProfile.username} mulai mengikuti Anda.`,
+          read: false,
+          createdAt: serverTimestamp()
+        });
+      } catch (notifErr) {
+        console.warn("Gagal mengirim notifikasi follow:", notifErr);
+      }
+    }
+
+    if (previewedProfileUid === targetUid) {
+      const previewFollowersEl = $("userPreviewFollowersCount");
+      if (previewFollowersEl) {
+        const snap = await getDocs(collection(db, "users", targetUid, "followers"));
+        previewFollowersEl.textContent = `${snap.size} Pengikut`;
+      }
+    }
+
+    if (feedScopeFilter !== "all") {
+      renderFilteredFeed();
+    }
+  } catch (error) {
+    console.error("Follow toggle error:", error);
+    if (wasFollowing) {
+      userFollowingSet.add(targetUid);
+    } else {
+      userFollowingSet.delete(targetUid);
+    }
+    showToast("Gagal memperbarui ikuti: " + error.message, "error");
+  } finally {
+    followingInFlightSet.delete(targetUid);
+    updateFollowButtonsInDom(targetUid);
+    updateProfileSocialCounters();
+  }
+}
+
+async function fetchUserProfileData(uid) {
+  if (!uid) return null;
+  const cached = userProfilesCache.get(uid);
+  if (cached && cached.username) return { uid, ...cached };
+
+  try {
+    const snap = await getDoc(doc(db, "users", uid));
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    userProfilesCache.set(uid, data);
+    return { uid, ...data };
+  } catch (err) {
+    console.warn("Gagal memuat data pengguna:", uid, err);
+    return null;
+  }
+}
+
+async function renderConnectionsList() {
+  const listEl = $("connectionsList");
+  const emptyEl = $("connectionsEmptyState");
+  const emptyTitle = $("connectionsEmptyTitle");
+  const emptyDesc = $("connectionsEmptyDesc");
+  if (!listEl || !currentUser) return;
+
+  listEl.replaceChildren();
+  if (emptyEl) emptyEl.hidden = true;
+
+  let users = [];
+  if (activeConnectionsTab === "discover") {
+    try {
+      const snap = await getDocs(query(collection(db, "users"), limit(50)));
+      snap.forEach(docSnap => {
+        if (docSnap.id !== currentUser.uid) {
+          const data = docSnap.data();
+          userProfilesCache.set(docSnap.id, data);
+          users.push({ uid: docSnap.id, ...data });
+        }
+      });
+    } catch (err) {
+      console.error("Load discover users error:", err);
+      showToast("Gagal memuat daftar pengguna: " + err.message, "error");
+    }
+  } else {
+    let targetUids = [];
+    if (activeConnectionsTab === "mutual") {
+      targetUids = getMutualUidList();
+    } else if (activeConnectionsTab === "followers") {
+      targetUids = Array.from(userFollowersSet);
+    } else if (activeConnectionsTab === "following") {
+      targetUids = Array.from(userFollowingSet);
+    }
+    const fetched = await Promise.all(targetUids.map(uid => fetchUserProfileData(uid)));
+    users = fetched.filter(Boolean);
+  }
+
+  if (users.length === 0) {
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      if (activeConnectionsTab === "mutual") {
+        if (emptyTitle) emptyTitle.textContent = "Belum Ada Mutualan";
+        if (emptyDesc) emptyDesc.textContent = "Saling ikuti dengan pengguna lain di feed atau tab Temukan Orang untuk menjadi mutual.";
+      } else if (activeConnectionsTab === "followers") {
+        if (emptyTitle) emptyTitle.textContent = "Belum Ada Pengikut";
+        if (emptyDesc) emptyDesc.textContent = "Pengguna yang mengikuti akun Anda akan tampil di sini.";
+      } else if (activeConnectionsTab === "following") {
+        if (emptyTitle) emptyTitle.textContent = "Belum Mengikuti Siapa Pun";
+        if (emptyDesc) emptyDesc.textContent = "Buka tab Temukan Orang untuk mengikuti pengguna lain.";
+      } else {
+        if (emptyTitle) emptyTitle.textContent = "Belum Ada Pengguna Lain";
+        if (emptyDesc) emptyDesc.textContent = "Pengguna baru yang mendaftar di InstaLite akan tampil di sini.";
+      }
+    }
+    return;
+  }
+
+  users.sort((a, b) => safeText(a.username).localeCompare(safeText(b.username), "id", { sensitivity: "base" }));
+
+  users.forEach(user => {
+    const item = document.createElement("div");
+    item.className = "connection-item";
+
+    const info = document.createElement("div");
+    info.className = "connection-user-info";
+    info.title = `Lihat profil @${safeText(user.username)}`;
+    info.addEventListener("click", () => {
+      closeModal("connectionsModal");
+      if (user.username) showUserProfilePreview(user.username);
+    });
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar-mini";
+    const username = safeText(user.username || "Pengguna");
+    renderAvatarElement(avatar, user.photoURL, username.charAt(0).toUpperCase(), username);
+
+    const meta = document.createElement("div");
+    meta.className = "connection-user-meta";
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "connection-username";
+    nameEl.textContent = `@${username}`;
+
+    const bioEl = document.createElement("div");
+    bioEl.className = "connection-bio";
+    bioEl.textContent = user.bio || "Pengguna InstaLite";
+
+    meta.append(nameEl, bioEl);
+    info.append(avatar, meta);
+
+    const followBtn = document.createElement("button");
+    followBtn.className = "btn-follow-pill";
+    followBtn.type = "button";
+    followBtn.dataset.targetUid = user.uid;
+    applyFollowButtonUI(followBtn, user.uid);
+    followBtn.addEventListener("click", () => toggleFollowUser(user.uid, username));
+
+    item.append(info, followBtn);
+    listEl.append(item);
+  });
+}
+
+function switchConnectionsTab(tabName) {
+  activeConnectionsTab = tabName;
+  document.querySelectorAll(".connections-tab-btn").forEach(btn => {
+    const active = btn.dataset.connectionsTab === tabName;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  renderConnectionsList();
+}
+
+function openConnectionsModal(tabName = "mutual") {
+  openModal("connectionsModal");
+  switchConnectionsTab(tabName);
+}
+
+$("profileFollowersBtn")?.addEventListener("click", () => openConnectionsModal("followers"));
+$("profileFollowingBtn")?.addEventListener("click", () => openConnectionsModal("following"));
+$("profileMutualBtn")?.addEventListener("click", () => openConnectionsModal("mutual"));
+$("openDiscoverUsersBtn")?.addEventListener("click", () => openConnectionsModal("discover"));
+
+document.querySelectorAll(".connections-tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    switchConnectionsTab(btn.dataset.connectionsTab || "mutual");
+  });
+});
 

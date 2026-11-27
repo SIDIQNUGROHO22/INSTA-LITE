@@ -28,6 +28,18 @@ service cloud.firestore {
     //   - postId: string (required, == document ID, 1..128 chars)
     //   - createdAt: timestamp (required)
     //
+    // Subcollection: users/{uid}/following/{targetUid}
+    // Document ID: {targetUid} (UID of followed user, != uid)
+    // Fields:
+    //   - targetUid: string (required, == targetUid, 1..128 chars)
+    //   - createdAt: timestamp (required)
+    //
+    // Subcollection: users/{uid}/followers/{followerUid}
+    // Document ID: {followerUid} (UID of follower user, != uid)
+    // Fields:
+    //   - uid: string (required, == followerUid, 1..128 chars)
+    //   - createdAt: timestamp (required)
+    //
     // Collection: posts
     // Document ID: {postId} (auto-generated)
     // Fields:
@@ -61,7 +73,7 @@ service cloud.firestore {
     //   - recipientUid: string (required, immutable, 1..128 chars, != request.auth.uid on create)
     //   - senderUid: string (required, immutable, == request.auth.uid on create, 1..128 chars)
     //   - senderUsername: string (required, immutable, matches ^[a-zA-Z0-9_.]{3,30}$)
-    //   - type: string (required, immutable, in ['like', 'comment', 'mention'])
+    //   - type: string (required, immutable, in ['like', 'comment', 'mention', 'follow'])
     //   - postId: string (required, immutable, <= 128 chars)
     //   - commentId: string (required, immutable, <= 128 chars)
     //   - message: string (required, immutable, <= 500 chars)
@@ -182,6 +194,26 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidFollowingDoc(data, targetUid) {
+      return hasRequiredFields(data, ['targetUid', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['targetUid', 'createdAt'])
+        && data.targetUid is string
+        && data.targetUid.size() > 0
+        && data.targetUid.size() <= 128
+        && data.targetUid == targetUid
+        && data.createdAt is timestamp;
+    }
+
+    function isValidFollowerDoc(data, followerUid) {
+      return hasRequiredFields(data, ['uid', 'createdAt'])
+        && hasOnlyAllowedFields(data, ['uid', 'createdAt'])
+        && data.uid is string
+        && data.uid.size() > 0
+        && data.uid.size() <= 128
+        && data.uid == followerUid
+        && data.createdAt is timestamp;
+    }
+
     function isValidPostMedia(data) {
       return data.mediaUrl is string
         && data.mediaPath is string
@@ -261,7 +293,7 @@ service cloud.firestore {
         && data.senderUid.size() > 0
         && data.senderUid.size() <= 128
         && isValidUsername(data.senderUsername)
-        && data.type in ['like', 'comment', 'mention']
+        && data.type in ['like', 'comment', 'mention', 'follow']
         && data.postId is string
         && data.postId.size() <= 128
         && data.commentId is string
@@ -333,6 +365,38 @@ service cloud.firestore {
 
         // Mengembalikan postingan yang disembunyikan: hanya pemilik akun
         allow delete: if isOwner(uid);
+      }
+
+      // ==========================================
+      // SUBKOLEKSI: following (/users/{uid}/following/{targetUid})
+      // ==========================================
+      match /following/{targetUid} {
+        // Pengguna terautentikasi dapat melihat daftar pengguna yang diikuti
+        allow read: if isAuthenticated();
+
+        // Mengikuti pengguna lain: hanya pemilik akun, tidak boleh mengikuti diri sendiri
+        allow create, update: if isOwner(uid)
+          && uid != targetUid
+          && isValidFollowingDoc(request.resource.data, targetUid);
+
+        // Berhenti mengikuti: hanya pemilik akun
+        allow delete: if isOwner(uid);
+      }
+
+      // ==========================================
+      // SUBKOLEKSI: followers (/users/{uid}/followers/{followerUid})
+      // ==========================================
+      match /followers/{followerUid} {
+        // Pengguna terautentikasi dapat melihat daftar pengikut pengguna
+        allow read: if isAuthenticated();
+
+        // Menambahkan diri sebagai pengikut: hanya pengikut yang bersangkutan, tidak boleh mengikuti diri sendiri
+        allow create, update: if isOwner(followerUid)
+          && uid != followerUid
+          && isValidFollowerDoc(request.resource.data, followerUid);
+
+        // Menghapus status pengikut: boleh dilakukan oleh pengikut (unfollow) maupun pemilik profil
+        allow delete: if isOwner(followerUid) || isOwner(uid);
       }
     }
 

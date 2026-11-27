@@ -1011,6 +1011,35 @@ input:focus + .input-svg,
   border-radius: var(--radius-full);
 }
 
+.profile-stats-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0 8px;
+}
+
+.badge-btn {
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--transition-fast);
+}
+
+.badge-btn:hover {
+  background: rgba(37, 99, 235, 0.16);
+  transform: translateY(-1px);
+}
+
+.badge-mutual {
+  background: rgba(16, 185, 129, 0.1);
+  color: #047857;
+  border-color: rgba(16, 185, 129, 0.35);
+}
+
+.badge-mutual.badge-btn:hover {
+  background: rgba(16, 185, 129, 0.18);
+}
+
 .profile-email {
   margin: 0 0 8px;
   font-size: 13px;
@@ -1229,6 +1258,37 @@ input:focus + .input-svg,
   box-shadow: var(--shadow-sm);
   padding: 14px 16px;
   margin-bottom: 20px;
+}
+
+.feed-scope-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.feed-scope-btn {
+  border: 1px solid rgba(203, 213, 225, 0.8);
+  background: rgba(255, 255, 255, 0.65);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.feed-scope-btn:hover {
+  background: rgba(37, 99, 235, 0.08);
+  color: var(--primary);
+}
+
+.feed-scope-btn.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
 }
 
 .feed-search-row {
@@ -1859,6 +1919,11 @@ input:focus + .input-svg,
   color: #8b5cf6;
 }
 
+.notification-icon-wrap.type-follow {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+}
+
 .notification-body {
   flex: 1;
   min-width: 0;
@@ -1987,16 +2052,154 @@ input:focus + .input-svg,
   margin: 12px 0 6px;
 }
 
+.user-preview-stats-row {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
 .user-preview-bio {
   font-size: 13px;
   color: var(--text-muted);
-  margin: 10px 0 0;
+  margin: 12px 0 0;
   line-height: 1.5;
   white-space: pre-line;
 }
 
-.user-preview-action-btn {
-  margin-top: 14px;
+.user-preview-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+/* Tombol Follow & Mutualan */
+.btn-follow-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition-fast);
+  white-space: nowrap;
+}
+
+.btn-follow-pill:hover:not(:disabled) {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+
+.btn-follow-pill:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.btn-follow-pill.is-follow-back {
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  border-color: #4f46e5;
+}
+
+.btn-follow-pill.is-following {
+  background: rgba(241, 245, 249, 0.9);
+  border-color: rgba(148, 163, 184, 0.55);
+  color: var(--text-main);
+}
+
+.btn-follow-pill.is-mutual {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #047857;
+}
+
+/* Modal Koneksi & Mutualan */
+.connections-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 12px 18px 10px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.75);
+  overflow-x: auto;
+}
+
+.connections-tab-btn {
+  border: 1px solid rgba(203, 213, 225, 0.75);
+  background: rgba(248, 250, 252, 0.8);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-fast);
+}
+
+.connections-tab-btn.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+}
+
+.connections-list {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 8px 16px 16px;
+}
+
+.connection-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 6px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.65);
+}
+
+.connection-item:last-child {
+  border-bottom: none;
+}
+
+.connection-user-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+}
+
+.connection-user-meta {
+  min-width: 0;
+  text-align: left;
+}
+
+.connection-username {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-bio {
+  font-size: 12px;
+  color: var(--text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Padding helper */
