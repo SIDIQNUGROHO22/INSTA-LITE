@@ -76,6 +76,14 @@
   <!-- Konten Utama -->
   <main class="container">
 
+    <!-- Banner Setup Supabase (Tampil jika supabase.js belum diisi) -->
+    <div id="supabaseConfigBanner" class="config-banner" hidden>
+      <div class="config-banner-text">
+        <strong>Supabase belum dikonfigurasi:</strong> Buat project gratis di <code>supabase.com</code>, jalankan <code>supabase_schema.sql</code>, lalu isi <code>url</code> &amp; <code>anonKey</code> di <code>supabase.js</code>.
+      </div>
+      <button id="openSupabaseGuideBannerBtn" class="btn-secondary btn-sm" type="button">Lihat Panduan Setup</button>
+    </div>
+
     <!-- ========================================== -->
     <!-- 1. PANEL AUTENTIKASI (LOGIN & REGISTER)     -->
     <!-- ========================================== -->
@@ -289,7 +297,7 @@
             </div>
           </div>
 
-          <!-- Progress Bar Upload Cloudinary -->
+          <!-- Progress Bar Upload Media -->
           <div id="uploadProgressBox" class="upload-progress-box" hidden>
             <div class="progress-bar-bg">
               <div id="uploadProgressBar" class="progress-bar-fill" style="width: 0%"></div>
@@ -299,7 +307,7 @@
 
           <!-- Tombol Submit Post -->
           <div class="post-submit-row">
-            <button id="cloudinaryHelpBtn" class="btn-text-subtle" type="button">Panduan Cloudinary</button>
+            <button id="mediaStorageHelpBtn" class="btn-text-subtle" type="button">Info Storage &amp; Backup</button>
             <button id="uploadButton" class="btn-primary" type="submit">
               <span class="btn-text">Posting Sekarang</span>
               <span class="spinner" hidden></span>
@@ -584,8 +592,8 @@
     </div>
   </div>
 
-  <!-- Modal Panduan Konfigurasi Cloudinary -->
-  <div id="cloudinaryGuideModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="cloudinaryGuideModalTitle" hidden>
+  <!-- Modal Panduan Konfigurasi Supabase & Backup Media -->
+  <div id="supabaseGuideModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="supabaseGuideModalTitle" hidden>
     <div class="modal-card modal-large">
       <div class="modal-header">
         <div class="modal-icon-circle icon-info">
@@ -595,25 +603,26 @@
             <line x1="12" y1="8" x2="12.01" y2="8"></line>
           </svg>
         </div>
-        <h4 id="cloudinaryGuideModalTitle">Panduan Konfigurasi Media Cloudinary (Gratis)</h4>
-        <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="cloudinaryGuideModal">&times;</button>
+        <h4 id="supabaseGuideModalTitle">Panduan Setup Supabase &amp; Backup Media (Gratis)</h4>
+        <button class="modal-close-btn" type="button" aria-label="Tutup Modal" data-close-modal="supabaseGuideModal">&times;</button>
       </div>
       <div class="modal-body guide-content">
-        <p><strong>Foto</strong> sudah bisa langsung diupload gratis (otomatis dikompresi ke Firestore). Untuk mengaktifkan upload <strong>video (MP4/MOV/WebM hingga 50 MB)</strong> dan foto kualitas asli tanpa biaya (paket Spark Firebase gratis), ikuti 3 langkah berikut:</p>
+        <p>InstaLite memakai <strong>Supabase</strong> (gratis tanpa kartu kredit) untuk Auth, Database PostgreSQL Realtime, dan Storage foto &amp; video (1 GB):</p>
         <ol class="guide-steps">
-          <li>Daftar akun gratis di <a href="https://cloudinary.com" target="_blank" rel="noopener">cloudinary.com</a> (100% gratis, tanpa kartu kredit).</li>
-          <li>Buka <strong>Settings</strong> &gt; tab <strong>Upload</strong> &gt; scroll ke <strong>Upload presets</strong> &gt; klik <strong>Add upload preset</strong>. Ubah <em>Signing Mode</em> menjadi <strong>Unsigned</strong>, lalu simpan.</li>
-          <li>Buka file <code>firebase.js</code> di proyek ini, lalu isi:
-            <pre class="code-preview"><code>export const CLOUDINARY_CONFIG = {
-  cloudName: "nama_cloud_kamu",
-  uploadPreset: "nama_preset_kamu"
+          <li>Buat project gratis di <a href="https://supabase.com" target="_blank" rel="noopener">supabase.com</a>.</li>
+          <li>Buka menu <strong>SQL Editor</strong>, salin seluruh isi file <code>supabase_schema.sql</code> dari repo ini, lalu klik <strong>Run</strong> (otomatis membuat tabel, RLS, trigger profil, dan bucket <code>instalite-media</code>).</li>
+          <li>Buka <strong>Project Settings &gt; API</strong>, lalu tempel <strong>Project URL</strong> dan <strong>anon / publishable key</strong> ke file <code>supabase.js</code>:
+            <pre class="code-preview"><code>export const SUPABASE_CONFIG = {
+  url: "https://project-anda.supabase.co",
+  anonKey: "anon_key_anda",
+  storageBucket: "instalite-media"
 };</code></pre>
           </li>
         </ol>
-        <p class="hint">Jika belum diisi, postingan foto &amp; foto profil tetap berjalan otomatis melalui kompresi Firestore.</p>
+        <p class="hint"><strong>Backup yang Disarankan:</strong> File versi Firebase sebelumnya tersimpan utuh di folder <code>backup/firebase_cloudinary_backup/</code>. Untuk cadangan media tambahan jika kuota 1 GB Supabase penuh, Anda juga dapat mengisi <code>CLOUDINARY_BACKUP_CONFIG</code> di <code>supabase.js</code>.</p>
       </div>
       <div class="modal-footer">
-        <button id="dismissCloudinaryGuideBtn" class="modal-close-btn-bottom btn-primary" type="button" data-close-modal="cloudinaryGuideModal">Mengerti</button>
+        <button id="dismissSupabaseGuideBtn" class="modal-close-btn-bottom btn-primary" type="button" data-close-modal="supabaseGuideModal">Mengerti</button>
       </div>
     </div>
   </div>
@@ -764,7 +773,7 @@
   <!-- Footer Modern -->
   <footer class="footer">
     <div class="footer-content">
-      <p>InstaLite &copy; 2026 — Dibuat untuk pembelajaran Firebase & Cloudinary.</p>
+      <p>InstaLite &copy; 2026 — Ditenagai oleh Supabase (Auth, PostgreSQL Realtime &amp; Storage).</p>
     </div>
   </footer>
 

@@ -1,0 +1,3353 @@
+import { auth, db, storage, CLOUDINARY_CONFIG } from "./firebase.js";
+
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  onAuthStateChanged,
+  signOut,
+  deleteUser,
+  EmailAuthProvider,
+  reauthenticateWithCredential
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-auth.js";
+
+import {
+  doc, getDoc, setDoc, updateDoc, deleteDoc,
+  collection, query, orderBy, onSnapshot,
+  where, getDocs, limit, serverTimestamp, writeBatch
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-firestore.js";
+
+import {
+  ref, deleteObject
+} from "https://www.gstatic.com/firebasejs/12.5.0/firebase-storage.js";
+
+// Helper pemilih elemen DOM
+const $ = id => document.getElementById(id);
+
+// State Aplikasi
+let currentUser = null;
+let currentProfile = null;
+let isRegister = false;
+let isRegistering = false;
+let isSubmittingPost = false;
+let isUpdatingProfile = false;
+let isDeletingAccount = false;
+let unsubscribeFeed = null;
+let postToDeleteId = null;
+let selectedMediaObjectUrl = null;
+
+// State Foto Profil & Feed Controls
+let pendingProfilePhotoFile = null;
+let removeProfilePhotoPending = false;
+let selectedProfilePhotoObjectUrl = null;
+let rawFeedPosts = [];
+const userProfilesCache = new Map();
+let feedSearchKeyword = "";
+let feedSortCriteria = "newest";
+let feedScopeFilter = "all"; // "all" | "following" | "mutual"
+
+// State Tahap 2: Interaksi Sosial, Notifikasi, Bookmark, Hide, & Mutualan
+let activeProfileTab = "my"; // "my" | "saved" | "hidden"
+let userBookmarksSet = new Set();
+let userHiddenPostsSet = new Set();
+let userFollowingSet = new Set();
+let userFollowersSet = new Set();
+let unsubscribeBookmarks = null;
+let unsubscribeHiddenPosts = null;
+let unsubscribeFollowing = null;
+let unsubscribeFollowers = null;
+let rawNotifications = [];
+let unsubscribeNotifications = null;
+let activeCommentPost = null;
+let unsubscribeActivePostComments = null;
+const postLikesCache = new Map(); // postId => { count: number, userLiked: boolean }
+const postCommentsCache = new Map(); // postId => { count: number }
+const postSubcollectionUnsubscribers = new Map();
+const likingPostsSet = new Set();
+const bookmarkingPostsSet = new Set();
+const hidingPostsSet = new Set();
+const followingInFlightSet = new Set();
+let activeConnectionsTab = "mutual";
+let previewedProfileUid = "";
+
+// Batasan format foto profil
+const ALLOWED_PROFILE_PHOTO = {
+  extensions: [".jpg", ".jpeg", ".png", ".webp"],
+  mimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/webp"],
+  maxSize: 5 * 1024 * 1024,
+  label: "JPG/JPEG/PNG/WebP (maksimal 5 MB)"
+};
+
+// Batasan format dan ukuran file media postingan
+const ALLOWED_MEDIA = {
+  images: {
+    extensions: [".jpg", ".jpeg", ".png", ".webp"],
+    mimeTypes: ["image/jpeg", "image/jpg", "image/png", "image/webp"],
+    maxSize: 10 * 1024 * 1024,
+    label: "JPG/JPEG/PNG/WebP (maksimal 10 MB)"
+  },
+  videos: {
+    extensions: [".mp4", ".mov", ".webm"],
+    mimeTypes: ["video/mp4", "video/quicktime", "video/webm"],
+    maxSize: 50 * 1024 * 1024,
+    label: "MP4/MOV/WebM (maksimal 50 MB)"
+  }
+};
+
+/* ==========================================================================
+   1. KOMPONEN TOAST NOTIFICATION MODERN (TOP CENTER)
+   ========================================================================== */
+function showToast(message, type = "info", customTitle = "") {
+  const container = $("toastContainer");
+  if (!container) return;
+
+  const defaultTitles = {
+    success: "Berhasil",
+    error: "Terjadi Kesalahan",
+    warning: "Perhatian",
+    info: "Informasi"
+  };
+
+  const icons = {
+    success: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>`,
+    error: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`,
+    warning: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`,
+    info: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`
+  };
+
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `
+    <div class="toast-icon">${icons[type] || icons.info}</div>
+    <div class="toast-content">
+      <h5 class="toast-title">${customTitle || defaultTitles[type] || "Notifikasi"}</h5>
+      <p class="toast-msg"></p>
+    </div>
+    <button class="toast-close" type="button" aria-label="Tutup Notifikasi">&times;</button>
+  `;
+
+  const msgEl = toast.querySelector(".toast-msg");
+  if (msgEl) {
+    const msgStr = String(message ?? "");
+    if (msgStr.includes("<svg") || msgStr.includes("<strong") || msgStr.includes("<span")) {
+      msgEl.innerHTML = msgStr;
+    } else {
+      msgEl.textContent = msgStr;
+    }
+  }
+
+  const closeBtn = toast.querySelector(".toast-close");
+  const dismiss = () => {
+    toast.classList.add("toast-hiding");
+    setTimeout(() => toast.remove(), 250);
+  };
+
+  closeBtn.addEventListener("click", dismiss);
+  container.append(toast);
+
+  // Auto dismiss setelah 4.5 detik
+  setTimeout(dismiss, 4500);
+
+  // Aksesibilitas
+  const statusEl = $("status");
+  if (statusEl) statusEl.textContent = message;
+}
+
+/* ==========================================================================
+   2. PENGONTROL MODAL DIALOG MODERN (ANIMASI, AKSESIBILITAS, & EVENT DELEGATION)
+   ========================================================================== */
+const MODAL_ANIMATION_DURATION = 220; // Milidetik (sinkron dengan durasi transisi CSS)
+
+function openModal(modalOrId) {
+  const modal = typeof modalOrId === "string" ? $(modalOrId) : modalOrId;
+  if (!modal) return;
+
+  // Batalkan timer animasi penutupan jika sedang berjalan
+  if (modal._closeTimer) {
+    clearTimeout(modal._closeTimer);
+    modal._closeTimer = null;
+  }
+
+  // Bersihkan kelas penutupan dan aktifkan rendering
+  modal.classList.remove("is-closing");
+  modal.hidden = false;
+  modal.removeAttribute("hidden");
+  modal.setAttribute("aria-hidden", "false");
+
+  // Kunci scroll latar belakang
+  document.body.style.overflow = "hidden";
+
+  // Force reflow agar state awal (opacity: 0 & scale) dicatat sebelum transisi berjalan
+  void modal.offsetHeight;
+
+  let rafHandled = false;
+  const activate = () => {
+    if (rafHandled) return;
+    rafHandled = true;
+    modal.classList.add("is-open");
+  };
+
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(activate);
+  }
+  setTimeout(activate, 40);
+}
+
+function closeModal(modalOrId) {
+  const modal = typeof modalOrId === "string" ? $(modalOrId) : modalOrId;
+  if (!modal || modal.hidden || modal.classList.contains("is-closing")) return;
+
+  // Batalkan timer sebelumnya jika ada
+  if (modal._closeTimer) {
+    clearTimeout(modal._closeTimer);
+    modal._closeTimer = null;
+  }
+
+  // Reset data internal spesifik jika modal ditutup/dibatalkan
+  if (modal.id === "deletePostModal") {
+    postToDeleteId = null;
+  }
+  if (modal.id === "deleteAccountModal") {
+    const pwdInput = $("deleteAccountPassword");
+    if (pwdInput) pwdInput.value = "";
+  }
+  if (modal.id === "commentModal") {
+    if (unsubscribeActivePostComments) {
+      unsubscribeActivePostComments();
+      unsubscribeActivePostComments = null;
+    }
+    activeCommentPost = null;
+  }
+
+  // Mulai animasi keluar
+  modal.classList.remove("is-open");
+  modal.classList.add("is-closing");
+  modal.setAttribute("aria-hidden", "true");
+
+  modal._closeTimer = setTimeout(() => {
+    modal.hidden = true;
+    modal.setAttribute("hidden", "");
+    modal.classList.remove("is-closing");
+    modal._closeTimer = null;
+
+    // Pulihkan scroll latar belakang hanya jika tidak ada modal lain yang terbuka
+    const stillOpen = document.querySelectorAll(".modal-backdrop.is-open:not([hidden])");
+    if (stillOpen.length === 0) {
+      document.body.style.overflow = "";
+    }
+  }, MODAL_ANIMATION_DURATION);
+}
+
+// Rekam target mousedown untuk mencegah penutupan modal saat pengguna menyeleksi teks
+// atau menyeret kursor dari dalam isi modal ke backdrop
+let modalMouseDownTarget = null;
+document.addEventListener("mousedown", event => {
+  modalMouseDownTarget = event.target;
+});
+
+// Event delegation terpusat untuk semua aksi tutup modal & klik backdrop
+document.addEventListener("click", event => {
+  // 1. Tombol penutup modal (data-close-modal, .modal-close-btn, .modal-close-btn-bottom)
+  const closeTrigger = event.target.closest("[data-close-modal], .modal-close-btn, .modal-close-btn-bottom");
+  if (closeTrigger) {
+    event.preventDefault();
+    const modalId = closeTrigger.getAttribute("data-close-modal");
+    if (modalId) {
+      closeModal(modalId);
+    } else {
+      const parentModal = closeTrigger.closest(".modal-backdrop");
+      if (parentModal) closeModal(parentModal);
+    }
+    return;
+  }
+
+  // 2. Klik pada backdrop (area gelap di luar kotak modal .modal-card)
+  // Pastikan klik tepat pada .modal-backdrop dan mousedown juga dimulai di .modal-backdrop
+  if (event.target.classList.contains("modal-backdrop") && modalMouseDownTarget === event.target) {
+    closeModal(event.target);
+  }
+});
+
+// Tutup modal teratas dengan tombol Escape
+window.addEventListener("keydown", event => {
+  if (event.key === "Escape" || event.key === "Esc") {
+    const openModals = Array.from(document.querySelectorAll(".modal-backdrop.is-open:not([hidden])"));
+    if (openModals.length > 0) {
+      const topModal = openModals[openModals.length - 1];
+      closeModal(topModal);
+    }
+  }
+});
+
+/* ==========================================================================
+   3. HELPER TEKS, TANGGAL & VALIDASI
+   ========================================================================== */
+function safeText(value) {
+  return String(value ?? "");
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function formatDate(value) {
+  if (!value?.toDate) return "Baru saja";
+  const date = value.toDate();
+  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
+
+  if (diffSec < 60) return "Baru saja";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} mnt lalu`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} jam lalu`;
+  return date.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function getAuthErrorMessage(code) {
+  switch (code) {
+    case "auth/email-already-in-use":
+      return "Alamat email ini sudah terdaftar. Silakan langsung masuk.";
+    case "auth/invalid-email":
+      return "Format alamat email tidak valid.";
+    case "auth/user-not-found":
+      return "Akun dengan email ini tidak ditemukan. Silakan daftar terlebih dahulu.";
+    case "auth/wrong-password":
+      return "Kata sandi yang Anda masukkan salah. Periksa kembali.";
+    case "auth/invalid-credential":
+      return "Email atau kata sandi tidak sesuai. Periksa kembali data Anda.";
+    case "auth/weak-password":
+      return "Kata sandi terlalu pendek. Gunakan minimal 6 karakter.";
+    case "auth/too-many-requests":
+      return "Terlalu banyak percobaan gagal. Akses diblokir sementara demi keamanan.";
+    case "auth/network-request-failed":
+      return "Gagal terhubung ke jaringan. Periksa sambungan internet Anda.";
+    case "auth/requires-recent-login":
+      return "Demi alasan keamanan, silakan keluar lalu masuk kembali.";
+    default:
+      return "Kendala autentikasi: " + (code || "Silakan periksa kembali data Anda.");
+  }
+}
+
+function normalizeMimeType(mime) {
+  return String(mime || "").toLowerCase().split(";")[0].trim();
+}
+
+function isSafeMediaUrl(url) {
+  if (typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) return true;
+  return /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/i.test(trimmed);
+}
+
+function isVideoFile(file) {
+  if (!file) return false;
+  const mime = normalizeMimeType(file.type);
+  const name = (file.name || "").toLowerCase();
+  return mime.startsWith("video/") || name.endsWith(".mp4") || name.endsWith(".mov") || name.endsWith(".webm");
+}
+
+function hasCloudinaryConfig() {
+  return Boolean(
+    CLOUDINARY_CONFIG?.cloudName &&
+    CLOUDINARY_CONFIG.cloudName.trim() &&
+    CLOUDINARY_CONFIG?.uploadPreset &&
+    CLOUDINARY_CONFIG.uploadPreset.trim()
+  );
+}
+
+// Validasi lengkap file foto dan video sebelum upload
+function validateMediaFile(file) {
+  const fileName = file.name || "";
+  const lastDot = fileName.lastIndexOf(".");
+  if (lastDot === -1) {
+    return { valid: false, message: "File tidak memiliki ekstensi. Gunakan JPG, PNG, WebP, MP4, MOV, atau WebM." };
+  }
+
+  const ext = fileName.slice(lastDot).toLowerCase();
+  const mime = normalizeMimeType(file.type);
+
+  const isImageExt = ALLOWED_MEDIA.images.extensions.includes(ext);
+  const isVideoExt = ALLOWED_MEDIA.videos.extensions.includes(ext);
+
+  if (!isImageExt && !isVideoExt) {
+    return { valid: false, message: "Format tidak didukung. Gunakan JPG, PNG, WebP, MP4, MOV, atau WebM." };
+  }
+
+  if (isImageExt) {
+    if (mime && !ALLOWED_MEDIA.images.mimeTypes.includes(mime)) {
+      return { valid: false, message: "Tipe file gambar tidak valid. Gunakan file JPG, PNG, atau WebP." };
+    }
+    if (file.size > ALLOWED_MEDIA.images.maxSize) {
+      return { valid: false, message: "Ukuran file foto melebihi batas maksimal 10 MB." };
+    }
+    return { valid: true, mediaType: "image" };
+  }
+
+  if (isVideoExt) {
+    if (mime && !ALLOWED_MEDIA.videos.mimeTypes.includes(mime)) {
+      return { valid: false, message: "Tipe file video tidak valid. Gunakan file video MP4, MOV, atau WebM." };
+    }
+    if (file.size > ALLOWED_MEDIA.videos.maxSize) {
+      return { valid: false, message: "Ukuran file video melebihi batas maksimal 50 MB." };
+    }
+    return { valid: true, mediaType: "video" };
+  }
+
+  return { valid: false, message: "File tidak memenuhi syarat." };
+}
+
+/* ==========================================================================
+   4. UPLOAD MEDIA (CLOUDINARY UTAMA + KOMPRESI FIRESTORE FALLBACK FOTO)
+   ========================================================================== */
+function formatCloudinaryError(rawMessage) {
+  const msg = safeText(rawMessage);
+  if (/unsigned/i.test(msg)) {
+    return "Upload Preset Cloudinary harus bertipe Unsigned (Settings -> Upload -> Upload presets).";
+  }
+  if (/cloud_name|unknown api key|not found/i.test(msg)) {
+    return "Cloud Name atau Upload Preset Cloudinary di firebase.js tidak ditemukan.";
+  }
+  return msg;
+}
+
+async function compressImageToDataUrl(file, { maxDimension = 1080, maxDataUrlLength = 600000 } = {}) {
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("File gambar rusak atau tidak dapat dibaca browser."));
+      image.src = objectUrl;
+    });
+
+    const srcWidth = img.naturalWidth || img.width;
+    const srcHeight = img.naturalHeight || img.height;
+    if (!srcWidth || !srcHeight) {
+      throw new Error("Dimensi gambar tidak valid.");
+    }
+
+    const baseRatio = Math.min(1, maxDimension / Math.max(srcWidth, srcHeight));
+    const scaleSteps = [1, 0.78, 0.6, 0.45];
+    const qualitySteps = [0.84, 0.72, 0.58, 0.44];
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      throw new Error("Browser tidak mendukung pemrosesan gambar Canvas.");
+    }
+
+    for (const scale of scaleSteps) {
+      const targetWidth = Math.max(1, Math.round(srcWidth * baseRatio * scale));
+      const targetHeight = Math.max(1, Math.round(srcHeight * baseRatio * scale));
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+
+      // Isi latar putih agar gambar PNG/WebP transparan tidak berubah menjadi hitam saat dikonversi ke JPEG
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, targetWidth, targetHeight);
+      ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+      for (const quality of qualitySteps) {
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        if (dataUrl.length <= maxDataUrlLength) {
+          return dataUrl;
+        }
+      }
+    }
+
+    throw new Error("Ukuran gambar tetap terlalu besar setelah dikompresi untuk disimpan ke Firestore.");
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function uploadToCloudinary(file, onProgress) {
+  const cloudName = (CLOUDINARY_CONFIG?.cloudName || "").trim();
+  const uploadPreset = (CLOUDINARY_CONFIG?.uploadPreset || "").trim();
+  if (!cloudName || !uploadPreset) {
+    throw new Error("CONFIG_MISSING");
+  }
+
+  const resourceType = isVideoFile(file) ? "video" : "image";
+  const url = `https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/${resourceType}/upload`;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("upload_preset", uploadPreset);
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = event => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          onProgress(percent);
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          if (!data.secure_url || !data.public_id) {
+            reject(new Error("Respon Cloudinary tidak menyertakan tautan media."));
+            return;
+          }
+          resolve({
+            secureUrl: data.secure_url,
+            publicId: data.public_id,
+            resourceType: resourceType
+          });
+        } else {
+          const msg = formatCloudinaryError(data?.error?.message || `HTTP ${xhr.status} ${xhr.statusText}`);
+          reject(new Error(msg));
+        }
+      } catch (err) {
+        reject(new Error("Gagal membaca respon unggahan dari Cloudinary."));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Gagal terhubung ke server Cloudinary. Periksa jaringan Anda."));
+    xhr.send(formData);
+  });
+}
+
+async function uploadMediaAsset(file, { isProfilePhoto = false, onProgress } = {}) {
+  if (hasCloudinaryConfig()) {
+    const uploaded = await uploadToCloudinary(file, onProgress);
+    return {
+      url: uploaded.secureUrl,
+      publicId: uploaded.publicId,
+      mediaType: uploaded.resourceType,
+      mode: "cloudinary"
+    };
+  }
+
+  if (isVideoFile(file)) {
+    throw new Error("VIDEO_REQUIRES_CLOUDINARY");
+  }
+
+  onProgress?.(30);
+  const dataUrl = await compressImageToDataUrl(file, {
+    maxDimension: isProfilePhoto ? 256 : 1080,
+    maxDataUrlLength: isProfilePhoto ? 75000 : 600000
+  });
+  onProgress?.(100);
+
+  return {
+    url: dataUrl,
+    publicId: "",
+    mediaType: "image",
+    mode: "firestore"
+  };
+}
+
+/* ==========================================================================
+   5. SISTEM AUTENTIKASI: TAB SWITCH, VISIBILITY, LOGIN & REGISTER
+   ========================================================================== */
+function setAuthMode(registerMode) {
+  isRegister = registerMode;
+  const tabLogin = $("tabLogin");
+  const tabRegister = $("tabRegister");
+  const regGroup = $("registerUsernameGroup");
+  const authTitle = $("authTitle");
+  const authSubtitle = $("authSubtitle");
+  const submitBtnText = $("authSubmit")?.querySelector(".btn-text");
+  const toggleBtn = $("toggleAuth");
+  const passwordInput = $("password");
+
+  if (isRegister) {
+    tabLogin?.classList.remove("active");
+    tabRegister?.classList.add("active");
+    if (regGroup) regGroup.hidden = false;
+    if (authTitle) authTitle.textContent = "Daftar Akun Baru";
+    if (authSubtitle) authSubtitle.textContent = "Buat akun InstaLite untuk mulai membagikan momen Anda.";
+    if (submitBtnText) submitBtnText.textContent = "Daftar Sekarang";
+    if (toggleBtn) toggleBtn.innerHTML = 'Sudah punya akun? <strong>Masuk di sini</strong>';
+    if (passwordInput) passwordInput.autocomplete = "new-password";
+  } else {
+    tabRegister?.classList.remove("active");
+    tabLogin?.classList.add("active");
+    if (regGroup) regGroup.hidden = true;
+    if (authTitle) authTitle.textContent = "Selamat datang";
+    if (authSubtitle) authSubtitle.textContent = "Masuk ke akun InstaLite Anda untuk terhubung.";
+    if (submitBtnText) submitBtnText.textContent = "Masuk";
+    if (toggleBtn) toggleBtn.innerHTML = '<span class="auth-prompt-text">Belum punya akun?</span> <strong>Daftar sekarang</strong>';
+    if (passwordInput) passwordInput.autocomplete = "current-password";
+  }
+}
+
+$("tabLogin")?.addEventListener("click", () => setAuthMode(false));
+$("tabRegister")?.addEventListener("click", () => setAuthMode(true));
+$("toggleAuth")?.addEventListener("click", () => setAuthMode(!isRegister));
+
+// Tombol intip / sembunyikan kata sandi
+$("togglePasswordVisibility")?.addEventListener("click", () => {
+  const pwd = $("password");
+  const btn = $("togglePasswordVisibility");
+  if (!pwd || !btn) return;
+  if (pwd.type === "password") {
+    pwd.type = "text";
+    btn.textContent = "Sembunyikan";
+  } else {
+    pwd.type = "password";
+    btn.textContent = "Lihat";
+  }
+});
+
+// Submit Form Autentikasi
+$("authForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+
+  const email = $("email").value.trim();
+  const password = $("password").value;
+  const regUsernameInput = $("regUsername");
+  const submitBtn = $("authSubmit");
+  const spinner = submitBtn?.querySelector(".spinner");
+
+  if (!email || !password) {
+    showToast("Email dan kata sandi wajib diisi.", "warning");
+    return;
+  }
+
+  if (password.length < 6) {
+    showToast("Kata sandi minimal harus 6 karakter.", "warning");
+    return;
+  }
+
+  // Tampilkan loading spinner
+  if (submitBtn) submitBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    if (isRegister) {
+      const regUsername = regUsernameInput ? regUsernameInput.value.trim() : "";
+
+      // Validasi format username
+      if (!/^[a-zA-Z0-9_.]{3,30}$/.test(regUsername)) {
+        showToast("Username harus 3–30 karakter: hanya huruf, angka, titik, atau garis bawah.", "warning");
+        if (submitBtn) submitBtn.disabled = false;
+        if (spinner) spinner.hidden = true;
+        return;
+      }
+
+      isRegistering = true;
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const newUser = userCredential.user;
+
+      // Cek apakah username sudah digunakan oleh orang lain
+      try {
+        const usernameQuery = query(collection(db, "users"), where("username", "==", regUsername));
+        const usernameSnap = await getDocs(usernameQuery);
+
+        if (!usernameSnap.empty) {
+          // Username duplikat! Batalkan pendaftaran dan hapus akun auth sementara
+          await deleteUser(newUser).catch(() => {});
+          await signOut(auth).catch(() => {});
+          isRegistering = false;
+          showToast(`Username "${regUsername}" sudah digunakan. Silakan pilih username lain.`, "warning");
+          if (submitBtn) submitBtn.disabled = false;
+          if (spinner) spinner.hidden = true;
+          return;
+        }
+      } catch (checkErr) {
+        console.warn("Pengecekan username unik Firestore dilewati:", checkErr);
+      }
+
+      // Inisialisasi dokumen profil pengguna di Firestore (Single Responsibility)
+      try {
+        await setDoc(doc(db, "users", newUser.uid), {
+          email: newUser.email,
+          username: regUsername,
+          bio: "",
+          createdAt: serverTimestamp()
+        });
+      } catch (firestoreError) {
+        console.error("Gagal menginisialisasi profil Firestore:", firestoreError.code, firestoreError.message, firestoreError);
+        showToast("Akun dibuat, namun profil gagal disimpan di Firestore. Pastikan firestore.rules sudah di-Publish di Firebase Console.", "error");
+        await signOut(auth).catch(() => {});
+        isRegistering = false;
+        if (submitBtn) submitBtn.disabled = false;
+        if (spinner) spinner.hidden = true;
+        return;
+      }
+
+      // Berhasil registrasi
+      isRegistering = false;
+      currentUser = newUser;
+      currentProfile = { username: regUsername, bio: "", email: newUser.email };
+      updateProfileUI(currentProfile);
+      setAuthMode(false);
+      $("authSection").hidden = true;
+      $("appSection").hidden = false;
+      $("navUserMenu").hidden = false;
+      showToast("Selamat datang di InstaLite! Akun Anda berhasil dibuat.", "success");
+      loadFeed();
+      listenToNotifications();
+      listenToUserBookmarks();
+      listenToUserHiddenPosts();
+      listenToUserFollowing();
+      listenToUserFollowers();
+    } else {
+      await signInWithEmailAndPassword(auth, email, password);
+      showToast("Berhasil masuk. Selamat datang kembali!", "success");
+    }
+  } catch (error) {
+    console.error("Auth error detail:", error.code, error.message, error);
+    isRegistering = false;
+    showToast(getAuthErrorMessage(error.code), "error");
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+/* ==========================================================================
+   6. LISTENER STATUS AUTENTIKASI PENGGUNA
+   ========================================================================== */
+onAuthStateChanged(auth, async user => {
+  currentUser = user;
+
+  if (unsubscribeFeed) {
+    unsubscribeFeed();
+    unsubscribeFeed = null;
+  }
+
+  if (!user) {
+    if (unsubscribeNotifications) { unsubscribeNotifications(); unsubscribeNotifications = null; }
+    if (unsubscribeBookmarks) { unsubscribeBookmarks(); unsubscribeBookmarks = null; }
+    if (unsubscribeHiddenPosts) { unsubscribeHiddenPosts(); unsubscribeHiddenPosts = null; }
+    if (unsubscribeFollowing) { unsubscribeFollowing(); unsubscribeFollowing = null; }
+    if (unsubscribeFollowers) { unsubscribeFollowers(); unsubscribeFollowers = null; }
+    if (unsubscribeActivePostComments) { unsubscribeActivePostComments(); unsubscribeActivePostComments = null; }
+    cleanupPostSubcollectionListeners();
+    userBookmarksSet.clear();
+    userHiddenPostsSet.clear();
+    userFollowingSet.clear();
+    userFollowersSet.clear();
+    updateProfileSocialCounters();
+    rawNotifications = [];
+    postLikesCache.clear();
+    postCommentsCache.clear();
+    updateProfileBadges();
+    const notifBadge = $("navNotificationBadge");
+    if (notifBadge) notifBadge.hidden = true;
+    switchProfileTab("my");
+
+    currentProfile = null;
+    userProfilesCache.clear();
+    rawFeedPosts = [];
+    feedSearchKeyword = "";
+    feedSortCriteria = "newest";
+    feedScopeFilter = "all";
+    document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+      const isAll = btn.dataset.feedScope === "all";
+      btn.classList.toggle("is-active", isAll);
+      btn.setAttribute("aria-selected", isAll ? "true" : "false");
+    });
+    $("navUserMenu").hidden = true;
+    $("appSection").hidden = true;
+    $("authSection").hidden = false;
+    $("profileUsername").textContent = "Pengguna";
+    $("profileEmail").textContent = "";
+    $("profileBioText").textContent = "";
+    $("profileAvatar").textContent = "U";
+    $("navAvatar").textContent = "U";
+    $("feed").replaceChildren();
+    return;
+  }
+
+  // Jika proses pendaftaran sedang berjalan di authForm, biarkan authForm menyelesaikannya
+  if (isRegistering) {
+    return;
+  }
+
+  // Tampilkan Skeleton Shimmer saat membaca profil dan feed
+  const skeleton = $("feedSkeleton");
+  if (skeleton) skeleton.hidden = false;
+
+  try {
+    const userDocRef = doc(db, "users", user.uid);
+    const snapshot = await getDoc(userDocRef);
+
+    if (!snapshot.exists()) {
+      console.warn("Dokumen profil Firestore tidak ditemukan untuk UID:", user.uid);
+      showToast("Dokumen profil Anda tidak ditemukan di Firestore. Silakan hubungi admin atau daftar ulang.", "error");
+      await signOut(auth).catch(() => {});
+      return;
+    }
+
+    currentProfile = snapshot.data();
+    updateProfileUI(currentProfile);
+
+    $("authSection").hidden = true;
+    $("appSection").hidden = false;
+    $("navUserMenu").hidden = false;
+
+    loadFeed();
+    listenToNotifications();
+    listenToUserBookmarks();
+    listenToUserHiddenPosts();
+    listenToUserFollowing();
+    listenToUserFollowers();
+  } catch (error) {
+    console.error("Load profile error detail:", error.code, error.message, error);
+    showToast("Gagal memuat profil: " + (error.code ? `[${error.code}] ` : "") + "Pastikan firestore.rules sudah di-Publish di Firebase Console.", "error");
+  } finally {
+    if (skeleton) skeleton.hidden = true;
+  }
+});
+
+function renderAvatarElement(container, photoURL, initial, username = "Pengguna") {
+  if (!container) return;
+  if (isSafeMediaUrl(photoURL)) {
+    const img = document.createElement("img");
+    img.src = photoURL.trim();
+    img.alt = safeText(username);
+    img.className = "avatar-photo-img";
+    img.loading = "lazy";
+    container.replaceChildren(img);
+  } else {
+    container.textContent = initial || "U";
+  }
+}
+
+function updateProfileUI(profile) {
+  if (!profile) return;
+  const username = profile.username || "Pengguna";
+  const initial = username.charAt(0).toUpperCase();
+
+  $("profileUsername").textContent = username;
+  $("profileEmail").textContent = currentUser?.email || profile.email || "";
+  $("profileBioText").textContent = profile.bio || "Belum ada bio.";
+  $("username").value = username;
+  $("bio").value = profile.bio || "";
+  $("bioCounter").textContent = `${(profile.bio || "").length}/500`;
+
+  // Avatar dan Navbar
+  renderAvatarElement($("profileAvatar"), profile.photoURL, initial, username);
+  renderAvatarElement($("navAvatar"), profile.photoURL, initial, username);
+  $("navUsername").textContent = username;
+
+  // Cache profil pengguna saat ini
+  if (currentUser) {
+    userProfilesCache.set(currentUser.uid, {
+      username: username,
+      photoURL: profile.photoURL || ""
+    });
+  }
+}
+
+/* ==========================================================================
+   7. FORM EDIT PROFIL, FOTO PROFIL & SINKRONISASI BATCH USERNAME
+   ========================================================================== */
+function updateEditProfileAvatarPreview() {
+  const previewImg = $("editProfileAvatarImg");
+  const initialSpan = $("editProfileAvatarInitial");
+  const removeBtn = $("removeProfilePhotoBtn");
+  const currentUsername = $("username")?.value.trim() || currentProfile?.username || "U";
+  const initial = currentUsername.charAt(0).toUpperCase();
+
+  if (pendingProfilePhotoFile && selectedProfilePhotoObjectUrl) {
+    if (previewImg) { previewImg.src = selectedProfilePhotoObjectUrl; previewImg.hidden = false; }
+    if (initialSpan) initialSpan.hidden = true;
+    if (removeBtn) removeBtn.hidden = false;
+  } else if (!removeProfilePhotoPending && currentProfile?.photoURL) {
+    if (previewImg) { previewImg.src = currentProfile.photoURL; previewImg.hidden = false; }
+    if (initialSpan) initialSpan.hidden = true;
+    if (removeBtn) removeBtn.hidden = false;
+  } else {
+    if (previewImg) { previewImg.src = ""; previewImg.hidden = true; }
+    if (initialSpan) { initialSpan.textContent = initial; initialSpan.hidden = false; }
+    if (removeBtn) removeBtn.hidden = true;
+  }
+}
+
+$("toggleEditProfileBtn")?.addEventListener("click", () => {
+  if (currentProfile) {
+    if ($("username")) $("username").value = currentProfile.username || "";
+    if ($("bio")) $("bio").value = currentProfile.bio || "";
+    if ($("bioCounter")) $("bioCounter").textContent = `${(currentProfile.bio || "").length}/500`;
+  }
+
+  // Reset state pemilihan foto profil
+  pendingProfilePhotoFile = null;
+  removeProfilePhotoPending = false;
+  if (selectedProfilePhotoObjectUrl) {
+    URL.revokeObjectURL(selectedProfilePhotoObjectUrl);
+    selectedProfilePhotoObjectUrl = null;
+  }
+  const photoInput = $("profilePhotoInput");
+  if (photoInput) photoInput.value = "";
+  const photoError = $("profilePhotoError");
+  if (photoError) { photoError.textContent = ""; photoError.hidden = true; }
+
+  updateEditProfileAvatarPreview();
+  openModal("editProfileModal");
+  setTimeout(() => $("username")?.focus(), 80);
+});
+
+$("cancelEditProfileBtn")?.addEventListener("click", () => {
+  closeModal("editProfileModal");
+});
+
+// Trigger file input foto profil
+$("pickProfilePhotoBtn")?.addEventListener("click", () => {
+  $("profilePhotoInput")?.click();
+});
+
+// Listener saat memilih file foto profil
+$("profilePhotoInput")?.addEventListener("change", event => {
+  const file = event.target.files && event.target.files[0];
+  const errorEl = $("profilePhotoError");
+  if (!file) return;
+
+  const fileName = file.name || "";
+  const lastDot = fileName.lastIndexOf(".");
+  const ext = lastDot !== -1 ? fileName.slice(lastDot).toLowerCase() : "";
+  const mime = normalizeMimeType(file.type);
+
+  if (!ALLOWED_PROFILE_PHOTO.extensions.includes(ext) || (mime && !ALLOWED_PROFILE_PHOTO.mimeTypes.includes(mime))) {
+    const msg = "Format foto tidak didukung. Gunakan file JPG, JPEG, PNG, atau WebP.";
+    if (errorEl) { errorEl.textContent = msg; errorEl.hidden = false; }
+    showToast(msg, "warning");
+    event.target.value = "";
+    return;
+  }
+
+  if (file.size > ALLOWED_PROFILE_PHOTO.maxSize) {
+    const msg = "Ukuran foto profil melebihi batas maksimal 5 MB.";
+    if (errorEl) { errorEl.textContent = msg; errorEl.hidden = false; }
+    showToast(msg, "warning");
+    event.target.value = "";
+    return;
+  }
+
+  if (errorEl) { errorEl.textContent = ""; errorEl.hidden = true; }
+  if (selectedProfilePhotoObjectUrl) {
+    URL.revokeObjectURL(selectedProfilePhotoObjectUrl);
+  }
+  selectedProfilePhotoObjectUrl = URL.createObjectURL(file);
+  pendingProfilePhotoFile = file;
+  removeProfilePhotoPending = false;
+  updateEditProfileAvatarPreview();
+});
+
+// Tombol hapus foto profil
+$("removeProfilePhotoBtn")?.addEventListener("click", () => {
+  pendingProfilePhotoFile = null;
+  removeProfilePhotoPending = true;
+  const photoInput = $("profilePhotoInput");
+  if (photoInput) photoInput.value = "";
+  if (selectedProfilePhotoObjectUrl) {
+    URL.revokeObjectURL(selectedProfilePhotoObjectUrl);
+    selectedProfilePhotoObjectUrl = null;
+  }
+  const errorEl = $("profilePhotoError");
+  if (errorEl) { errorEl.textContent = ""; errorEl.hidden = true; }
+  updateEditProfileAvatarPreview();
+});
+
+// Live character counter untuk bio & inisial preview
+$("bio")?.addEventListener("input", event => {
+  const counter = $("bioCounter");
+  if (counter) counter.textContent = `${event.target.value.length}/500`;
+});
+
+$("username")?.addEventListener("input", () => {
+  if (!pendingProfilePhotoFile && (removeProfilePhotoPending || !currentProfile?.photoURL)) {
+    updateEditProfileAvatarPreview();
+  }
+});
+
+$("profileForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!currentUser || isUpdatingProfile) return;
+
+  const newUsername = $("username").value.trim();
+  const newBio = $("bio").value.trim();
+  const saveBtn = $("saveProfileBtn");
+  const spinner = saveBtn?.querySelector(".spinner");
+
+  if (!/^[a-zA-Z0-9_.]{3,30}$/.test(newUsername)) {
+    showToast("Username harus 3–30 karakter: hanya huruf, angka, titik, atau garis bawah.", "warning");
+    return;
+  }
+
+  if (newBio.length > 500) {
+    showToast("Bio maksimal 500 karakter.", "warning");
+    return;
+  }
+
+  isUpdatingProfile = true;
+  if (saveBtn) saveBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    // 1. Jika username berubah, periksa apakah username baru sudah dipakai pengguna lain
+    const previousUsername = currentProfile?.username;
+    if (newUsername !== previousUsername) {
+      try {
+        const dupQuery = query(collection(db, "users"), where("username", "==", newUsername));
+        const dupSnap = await getDocs(dupQuery);
+        if (!dupSnap.empty && dupSnap.docs.some(d => d.id !== currentUser.uid)) {
+          showToast(`Username "${newUsername}" sudah digunakan oleh orang lain.`, "warning");
+          isUpdatingProfile = false;
+          if (saveBtn) saveBtn.disabled = false;
+          if (spinner) spinner.hidden = true;
+          return;
+        }
+      } catch (dupErr) {
+        console.warn("Pengecekan username unik dilewati:", dupErr);
+      }
+    }
+
+    // 2. Proses foto profil (Cloudinary jika dikonfigurasi, atau kompresi Firestore gratis)
+    let newPhotoURL = undefined;
+    let newPhotoPublicId = undefined;
+
+    if (pendingProfilePhotoFile) {
+      try {
+        const uploaded = await uploadMediaAsset(pendingProfilePhotoFile, { isProfilePhoto: true });
+        newPhotoURL = uploaded.url;
+        newPhotoPublicId = uploaded.publicId;
+      } catch (uploadErr) {
+        console.error("Gagal mengunggah foto profil:", uploadErr);
+        isUpdatingProfile = false;
+        if (saveBtn) saveBtn.disabled = false;
+        if (spinner) spinner.hidden = true;
+        showToast(`Gagal mengunggah foto profil: ${uploadErr.message}`, "error");
+        return;
+      }
+    } else if (removeProfilePhotoPending) {
+      newPhotoURL = "";
+      newPhotoPublicId = "";
+    }
+
+    // 3. TAHAP 1: Perbarui dokumen profil pengguna di Firestore
+    const profileUpdateData = {
+      username: newUsername,
+      bio: newBio
+    };
+    if (newPhotoURL !== undefined) {
+      profileUpdateData.photoURL = newPhotoURL;
+      profileUpdateData.photoPublicId = newPhotoPublicId;
+    }
+
+    await updateDoc(doc(db, "users", currentUser.uid), profileUpdateData);
+
+    // Perbarui state lokal profil
+    currentProfile.username = newUsername;
+    currentProfile.bio = newBio;
+    if (newPhotoURL !== undefined) {
+      currentProfile.photoURL = newPhotoURL;
+      currentProfile.photoPublicId = newPhotoPublicId;
+    }
+
+    userProfilesCache.set(currentUser.uid, {
+      username: newUsername,
+      photoURL: currentProfile.photoURL || ""
+    });
+
+    updateProfileUI(currentProfile);
+
+    // 4. TAHAP 2: Jika username berubah, ambil seluruh postingan milik pengguna saat ini dan sinkronkan
+    let updatedPostsCount = 0;
+    if (newUsername !== previousUsername) {
+      const userPostsQuery = query(
+        collection(db, "posts"),
+        where("uid", "==", currentUser.uid)
+      );
+      const userPostsSnap = await getDocs(userPostsQuery);
+
+      if (!userPostsSnap.empty) {
+        updatedPostsCount = userPostsSnap.size;
+        const BATCH_SIZE = 450;
+        const docs = userPostsSnap.docs;
+        for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+          const chunk = docs.slice(i, i + BATCH_SIZE);
+          const batch = writeBatch(db);
+          for (const postDoc of chunk) {
+            batch.update(postDoc.ref, { username: newUsername });
+          }
+          await batch.commit();
+        }
+      }
+    }
+
+    // Bersihkan file sementara
+    pendingProfilePhotoFile = null;
+    removeProfilePhotoPending = false;
+    if (selectedProfilePhotoObjectUrl) {
+      URL.revokeObjectURL(selectedProfilePhotoObjectUrl);
+      selectedProfilePhotoObjectUrl = null;
+    }
+
+    // Render ulang feed agar perubahan foto profil atau username langsung tampil
+    renderFilteredFeed();
+
+    closeModal("editProfileModal");
+    showToast(`Profil berhasil diperbarui${updatedPostsCount > 0 ? ` dan disinkronkan ke ${updatedPostsCount} postingan` : ""}!`, "success");
+  } catch (error) {
+    console.error("Update profile error detail:", error.code, error.message, error);
+    showToast("Profil gagal diperbarui: " + (error.code ? `[${error.code}] ` : "") + error.message, "error");
+  } finally {
+    isUpdatingProfile = false;
+    if (saveBtn) saveBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+/* ==========================================================================
+   8. PEMBUATAN POSTINGAN, PREVIEW MEDIA & UPLOAD CLOUDINARY
+   ========================================================================== */
+// Live character counter untuk caption
+$("caption")?.addEventListener("input", event => {
+  const counter = $("captionCounter");
+  if (counter) counter.textContent = `${event.target.value.length}/2200`;
+});
+
+// Pilih media dan tampilkan preview instan
+$("mediaFile")?.addEventListener("change", event => {
+  const file = event.target.files && event.target.files[0];
+  const previewBox = $("mediaPreviewBox");
+  const imgPreview = $("mediaPreviewImg");
+  const videoPreview = $("mediaPreviewVideo");
+  const fileNameText = $("previewFileName");
+
+  if (!file) {
+    if (previewBox) previewBox.hidden = true;
+    return;
+  }
+
+  // Validasi file sebelum preview
+  const validation = validateMediaFile(file);
+  if (!validation.valid) {
+    showToast(validation.message, "warning");
+    event.target.value = "";
+    if (previewBox) previewBox.hidden = true;
+    return;
+  }
+
+  // Bersihkan object URL lama jika ada
+  if (selectedMediaObjectUrl) {
+    URL.revokeObjectURL(selectedMediaObjectUrl);
+  }
+
+  selectedMediaObjectUrl = URL.createObjectURL(file);
+
+  if (validation.mediaType === "image") {
+    imgPreview.src = selectedMediaObjectUrl;
+    imgPreview.hidden = false;
+    videoPreview.hidden = true;
+    videoPreview.pause();
+  } else {
+    videoPreview.src = selectedMediaObjectUrl;
+    videoPreview.hidden = false;
+    imgPreview.hidden = true;
+  }
+
+  fileNameText.textContent = `${file.name} (${formatFileSize(file.size)})`;
+  previewBox.hidden = false;
+});
+
+// Tombol hapus media yang sudah dipilih
+$("removeMediaBtn")?.addEventListener("click", () => {
+  const fileInput = $("mediaFile");
+  if (fileInput) fileInput.value = "";
+  if (selectedMediaObjectUrl) {
+    URL.revokeObjectURL(selectedMediaObjectUrl);
+    selectedMediaObjectUrl = null;
+  }
+  const previewBox = $("mediaPreviewBox");
+  if (previewBox) previewBox.hidden = true;
+});
+
+// Buka modal bantuan konfigurasi Cloudinary
+$("cloudinaryHelpBtn")?.addEventListener("click", () => {
+  openModal("cloudinaryGuideModal");
+});
+
+// Tutup modal panduan konfigurasi Cloudinary lewat tombol Mengerti
+$("dismissCloudinaryGuideBtn")?.addEventListener("click", () => {
+  closeModal("cloudinaryGuideModal");
+});
+
+// Navigasi cepat scroll ke form posting
+$("navCreateBtn")?.addEventListener("click", () => {
+  const card = $("createPostCard");
+  if (card) {
+    card.scrollIntoView({ behavior: "smooth" });
+    $("caption")?.focus();
+  }
+});
+
+$("navDashboardBtn")?.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+
+$("navProfileBtn")?.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+
+// Submit Form Buat Postingan
+$("postForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!currentUser || isSubmittingPost) return;
+
+  const fileInput = $("mediaFile");
+  const file = fileInput.files && fileInput.files[0];
+  const caption = $("caption").value.trim();
+  const uploadBtn = $("uploadButton");
+  const spinner = uploadBtn?.querySelector(".spinner");
+  const progressBox = $("uploadProgressBox");
+  const progressBar = $("uploadProgressBar");
+  const progressText = $("uploadProgressText");
+
+  if (!file && !caption) {
+    showToast("Silakan tulis caption atau pilih media untuk dibagikan.", "warning");
+    return;
+  }
+
+  if (caption.length > 2200) {
+    showToast("Caption maksimal 2200 karakter.", "warning");
+    return;
+  }
+
+  let mediaUrl = "";
+  let mediaPath = "";
+  let mediaPublicId = "";
+  let mediaType = "text";
+  let uploadMode = "text";
+
+  // Jika melampirkan media foto atau video
+  if (file) {
+    const validation = validateMediaFile(file);
+    if (!validation.valid) {
+      showToast(validation.message, "warning");
+      return;
+    }
+
+    isSubmittingPost = true;
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (spinner) spinner.hidden = false;
+    if (progressBox) progressBox.hidden = false;
+    if (progressBar) progressBar.style.width = "0%";
+    if (progressText) progressText.textContent = hasCloudinaryConfig()
+      ? "Mengunggah media: 0%"
+      : "Mengompresi foto: 0%";
+
+    try {
+      const uploaded = await uploadMediaAsset(file, {
+        isProfilePhoto: false,
+        onProgress: percent => {
+          if (progressBar) progressBar.style.width = `${percent}%`;
+          if (progressText) {
+            progressText.textContent = hasCloudinaryConfig()
+              ? `Mengunggah media: ${percent}%`
+              : `Memproses foto: ${percent}%`;
+          }
+        }
+      });
+
+      mediaUrl = uploaded.url;
+      mediaPublicId = uploaded.publicId;
+      mediaPath = "";
+      mediaType = uploaded.mediaType;
+      uploadMode = uploaded.mode;
+    } catch (uploadErr) {
+      console.error("Upload media error detail:", uploadErr);
+      if (uploadErr.message === "VIDEO_REQUIRES_CLOUDINARY") {
+        openModal("cloudinaryGuideModal");
+        showToast("Upload video membutuhkan Cloudinary di firebase.js (gratis). Untuk posting foto, bisa langsung upload tanpa Cloudinary!", "info");
+      } else {
+        showToast(`Gagal mengunggah media: ${uploadErr.message}`, "error");
+      }
+      isSubmittingPost = false;
+      if (uploadBtn) uploadBtn.disabled = false;
+      if (spinner) spinner.hidden = true;
+      if (progressBox) progressBox.hidden = true;
+      return;
+    }
+  }
+
+  isSubmittingPost = true;
+  if (uploadBtn) uploadBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    const currentUsername = currentProfile?.username || "Pengguna";
+    const postRef = doc(collection(db, "posts"));
+
+    await setDoc(postRef, {
+      uid: currentUser.uid,
+      username: currentUsername,
+      caption,
+      mediaUrl,
+      mediaPath,
+      mediaPublicId,
+      mediaType,
+      createdAt: serverTimestamp()
+    });
+
+    // Kirim notifikasi mention jika ada pengguna yang disebut dalam caption
+    if (caption) {
+      sendMentionNotifications(caption, postRef.id, "").catch(err => {
+        console.warn("Mention notifications notice:", err);
+      });
+    }
+
+    // Reset Form Postingan
+    $("postForm").reset();
+    $("captionCounter").textContent = "0/2200";
+    if (selectedMediaObjectUrl) {
+      URL.revokeObjectURL(selectedMediaObjectUrl);
+      selectedMediaObjectUrl = null;
+    }
+    $("mediaPreviewBox").hidden = true;
+    if (progressBox) progressBox.hidden = true;
+
+    showToast(
+      mediaUrl
+        ? (uploadMode === "firestore" ? "Foto berhasil dikompresi & diposting!" : "Momen Anda berhasil diposting!")
+        : "Postingan teks berhasil dibuat!",
+      "success"
+    );
+  } catch (postErr) {
+    console.error("Save post error detail:", postErr.code, postErr.message, postErr);
+    showToast("Postingan gagal disimpan: " + (postErr.code ? `[${postErr.code}] ` : "") + postErr.message, "error");
+  } finally {
+    isSubmittingPost = false;
+    if (uploadBtn) uploadBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+/* ==========================================================================
+   9. FEED POSTINGAN REAL-TIME, PENCARIAN & PENGURUTAN FEED
+   ========================================================================== */
+
+// Helper untuk mengambil timestamp postingan dalam milidetik
+function getPostTimestamp(post) {
+  if (post.createdAt?.toMillis) return post.createdAt.toMillis();
+  if (post.createdAt?.seconds) return post.createdAt.seconds * 1000;
+  if (post.createdAt instanceof Date) return post.createdAt.getTime();
+  return 0;
+}
+
+// Helper untuk menghitung jumlah like postingan
+function getPostLikesCount(post) {
+  const cached = postLikesCache.get(post.id);
+  if (cached && typeof cached.count === "number") return cached.count;
+  if (typeof post.likesCount === "number") return post.likesCount;
+  if (typeof post.likeCount === "number") return post.likeCount;
+  if (Array.isArray(post.likes)) return post.likes.length;
+  return 0;
+}
+
+// Helper untuk menghitung jumlah komentar postingan
+function getPostCommentsCount(post) {
+  const cached = postCommentsCache.get(post.id);
+  if (cached && typeof cached.count === "number") return cached.count;
+  if (typeof post.commentsCount === "number") return post.commentsCount;
+  if (typeof post.commentCount === "number") return post.commentCount;
+  if (Array.isArray(post.comments)) return post.comments.length;
+  return 0;
+}
+
+// Mengambil dan menyimpan profil penulis secara asinkron untuk menampilkan foto profil di postingan
+async function fetchAndCacheUserProfile(uid) {
+  if (!uid || userProfilesCache.has(uid)) return;
+  // Tandai sebagai pending agar tidak request ganda
+  userProfilesCache.set(uid, { username: "", photoURL: "", pending: true });
+
+  try {
+    const userDocSnap = await getDoc(doc(db, "users", uid));
+    if (userDocSnap.exists()) {
+      const data = userDocSnap.data();
+      userProfilesCache.set(uid, data);
+      if (isSafeMediaUrl(data.photoURL)) {
+        // Perbarui semua avatar pada postingan milik author ini yang sudah ter-render di feed
+        const authorName = data.username || "Pengguna";
+        const authorInitial = authorName.charAt(0).toUpperCase();
+        const avatars = document.querySelectorAll(`.post-author-avatar[data-author-uid="${uid}"]`);
+        avatars.forEach(el => {
+          renderAvatarElement(el, data.photoURL, authorInitial, authorName);
+        });
+      }
+    } else {
+      userProfilesCache.set(uid, null);
+    }
+  } catch (err) {
+    console.warn("Gagal membaca profil penulis:", uid, err);
+  }
+}
+
+// Komponen pembuat kartu postingan modern dengan interaksi Tahap 2 lengkap
+function createPostCardElement(post, options = {}) {
+  const postId = post.id;
+  const card = document.createElement("article");
+  card.className = "post-card";
+  card.dataset.postId = postId;
+
+  // Header Postingan (Avatar, Username, Waktu)
+  const authorUsername = safeText(post.username || "Pengguna");
+  const authorInitial = authorUsername.charAt(0).toUpperCase();
+  const formattedDate = formatDate(post.createdAt);
+
+  const header = document.createElement("div");
+  header.className = "post-header";
+
+  const authorBox = document.createElement("div");
+  authorBox.className = "post-author-box";
+
+  // Avatar Mini Penulis Postingan
+  const avatarEl = document.createElement("div");
+  avatarEl.className = "avatar-mini post-author-avatar post-author-name-clickable";
+  avatarEl.dataset.authorUid = post.uid || "";
+  avatarEl.title = `Lihat profil @${authorUsername}`;
+  avatarEl.addEventListener("click", () => showUserProfilePreview(authorUsername));
+
+  const cachedAuthor = (currentUser && post.uid === currentUser.uid)
+    ? currentProfile
+    : userProfilesCache.get(post.uid);
+
+  if (cachedAuthor && isSafeMediaUrl(cachedAuthor.photoURL)) {
+    renderAvatarElement(avatarEl, cachedAuthor.photoURL, authorInitial, authorUsername);
+  } else {
+    avatarEl.textContent = authorInitial;
+    if (post.uid && !userProfilesCache.has(post.uid)) {
+      fetchAndCacheUserProfile(post.uid);
+    }
+  }
+
+  const nameTimeBox = document.createElement("div");
+  nameTimeBox.innerHTML = `
+    <div class="post-author-name post-author-name-clickable" title="Lihat profil @${authorUsername}">${authorUsername}</div>
+    <div class="post-date">${formattedDate}</div>
+  `;
+  const nameEl = nameTimeBox.querySelector(".post-author-name");
+  if (nameEl) {
+    nameEl.addEventListener("click", () => showUserProfilePreview(authorUsername));
+  }
+
+  authorBox.append(avatarEl, nameTimeBox);
+  header.append(authorBox);
+
+  if (currentUser && post.uid && post.uid !== currentUser.uid) {
+    const followBtn = document.createElement("button");
+    followBtn.className = "btn-follow-pill";
+    followBtn.type = "button";
+    followBtn.dataset.targetUid = post.uid;
+    applyFollowButtonUI(followBtn, post.uid);
+    followBtn.addEventListener("click", () => toggleFollowUser(post.uid, authorUsername));
+    header.append(followBtn);
+  }
+
+  card.append(header);
+
+  // Media Postingan (Foto atau Video)
+  if (isSafeMediaUrl(post.mediaUrl)) {
+    const mediaUrlTrimmed = post.mediaUrl.trim();
+    const isHttpMedia = mediaUrlTrimmed.startsWith("http://") || mediaUrlTrimmed.startsWith("https://");
+
+    if (post.mediaType === "video" && isHttpMedia) {
+      const mediaContainer = document.createElement("div");
+      mediaContainer.className = "post-media-container";
+      const video = document.createElement("video");
+      video.className = "post-media";
+      video.src = mediaUrlTrimmed;
+      video.controls = true;
+      video.preload = "metadata";
+      video.playsInline = true;
+      mediaContainer.append(video);
+      card.append(mediaContainer);
+    } else if (post.mediaType === "image") {
+      const mediaContainer = document.createElement("div");
+      mediaContainer.className = "post-media-container";
+      const img = document.createElement("img");
+      img.className = "post-media";
+      img.src = mediaUrlTrimmed;
+      img.alt = "Foto postingan";
+      img.loading = "lazy";
+      mediaContainer.append(img);
+      card.append(mediaContainer);
+    }
+  }
+
+  // Caption Postingan (dengan parser mention @username)
+  if (post.caption) {
+    const captionBox = document.createElement("div");
+    captionBox.className = "post-caption-box";
+    captionBox.innerHTML = parseMentionsToHtml(post.caption);
+    card.append(captionBox);
+  }
+
+  // Action Row (Like, Comment, Bookmark, Hide, Delete)
+  const actionsRow = document.createElement("div");
+  actionsRow.className = "post-actions-row";
+
+  // Sisi Kiri: Like & Comment
+  const leftActions = document.createElement("div");
+  leftActions.className = "post-actions-left";
+
+  // Like Button
+  const likeCache = postLikesCache.get(postId);
+  const isLiked = likeCache ? !!likeCache.userLiked : false;
+  const likesCount = likeCache ? (likeCache.count || 0) : 0;
+
+  const likeBtn = document.createElement("button");
+  likeBtn.className = `post-action-btn btn-like-post ${isLiked ? "is-active-like" : ""}`;
+  likeBtn.type = "button";
+  likeBtn.dataset.postId = postId;
+  likeBtn.setAttribute("aria-label", isLiked ? "Batal menyukai" : "Sukai postingan");
+  likeBtn.innerHTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="${isLiked ? "#ef4444" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+    </svg>
+    <span class="post-like-count">${likesCount}</span>
+  `;
+  likeBtn.addEventListener("click", () => togglePostLike(postId));
+  leftActions.append(likeBtn);
+
+  // Comment Button
+  const commentCache = postCommentsCache.get(postId);
+  const commentsCount = commentCache ? (commentCache.count || 0) : 0;
+
+  const commentBtn = document.createElement("button");
+  commentBtn.className = "post-action-btn btn-comment-post";
+  commentBtn.type = "button";
+  commentBtn.dataset.postId = postId;
+  commentBtn.setAttribute("aria-label", "Lihat dan tulis komentar");
+  commentBtn.innerHTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+    </svg>
+    <span class="post-comment-count">${commentsCount}</span>
+  `;
+  commentBtn.addEventListener("click", () => openCommentModal(postId));
+  leftActions.append(commentBtn);
+
+  actionsRow.append(leftActions);
+
+  // Sisi Kanan: Bookmark, Hide/Unhide, Delete
+  const rightActions = document.createElement("div");
+  rightActions.className = "post-actions-right";
+
+  if (options?.showUnhideBtn) {
+    // Tombol Unhide jika sedang ditampilkan di Tab Disembunyikan
+    const unhideBtn = document.createElement("button");
+    unhideBtn.className = "btn-unhide-post";
+    unhideBtn.type = "button";
+    unhideBtn.title = "Kembalikan postingan ke feed";
+    unhideBtn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+        <circle cx="12" cy="12" r="3"></circle>
+      </svg>
+      <span>Tampilkan di Feed</span>
+    `;
+    unhideBtn.addEventListener("click", () => unhidePostFromFeed(postId));
+    rightActions.append(unhideBtn);
+  } else {
+    // Tombol Bookmark
+    const isBookmarked = userBookmarksSet.has(postId);
+    const bookmarkBtn = document.createElement("button");
+    bookmarkBtn.className = `post-action-btn btn-bookmark-post ${isBookmarked ? "is-active-bookmark" : ""}`;
+    bookmarkBtn.type = "button";
+    bookmarkBtn.dataset.postId = postId;
+    bookmarkBtn.title = isBookmarked ? "Batalkan Simpan" : "Simpan Postingan";
+    bookmarkBtn.setAttribute("aria-label", bookmarkBtn.title);
+    bookmarkBtn.innerHTML = `
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="${isBookmarked ? "#f59e0b" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
+      </svg>
+    `;
+    bookmarkBtn.addEventListener("click", () => togglePostBookmark(postId));
+    rightActions.append(bookmarkBtn);
+
+    // Tombol Sembunyikan (Hide Post)
+    const hideBtn = document.createElement("button");
+    hideBtn.className = "post-action-icon-btn btn-hide-post";
+    hideBtn.type = "button";
+    hideBtn.title = "Sembunyikan dari feed saya";
+    hideBtn.setAttribute("aria-label", "Sembunyikan postingan dari feed");
+    hideBtn.innerHTML = `
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+        <line x1="1" y1="1" x2="23" y2="23"></line>
+      </svg>
+    `;
+    hideBtn.addEventListener("click", () => hidePostFromFeed(postId));
+    rightActions.append(hideBtn);
+  }
+
+  // Tombol Hapus Postingan (Khusus pemilik postingan)
+  if (currentUser && post.uid === currentUser.uid) {
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "btn-delete-post";
+    deleteBtn.type = "button";
+    deleteBtn.title = "Hapus Postingan Permanen";
+    deleteBtn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"></polyline>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+      </svg>
+      <span>Hapus</span>
+    `;
+    deleteBtn.addEventListener("click", () => {
+      postToDeleteId = postId;
+      openModal("deletePostModal");
+    });
+    rightActions.append(deleteBtn);
+  }
+
+  actionsRow.append(rightActions);
+  card.append(actionsRow);
+
+  return card;
+}
+
+// Fungsi utama untuk menyaring (filter), mengurutkan (sort), dan me-render feed
+function renderFilteredFeed() {
+  const feed = $("feed");
+  const emptyFeed = $("emptyFeed");
+  const emptySearchFeed = $("emptySearchFeed");
+  const emptySearchText = $("emptySearchText");
+  const statusRow = $("feedFilterStatusRow");
+  const resultCountText = $("feedResultCountText");
+  const clearBtn = $("clearSearchBtn");
+
+  if (!feed) return;
+
+  // Jika belum ada postingan sama sekali di database
+  if (rawFeedPosts.length === 0) {
+    if (emptyFeed) emptyFeed.hidden = false;
+    if (emptySearchFeed) emptySearchFeed.hidden = true;
+    if (statusRow) statusRow.hidden = true;
+    feed.replaceChildren();
+    return;
+  }
+
+  if (emptyFeed) emptyFeed.hidden = true;
+
+  // 1. Saring postingan yang disembunyikan oleh pengguna saat ini
+  let filtered = rawFeedPosts.filter(post => !userHiddenPostsSet.has(post.id));
+
+  // 1b. Saring berdasarkan ruang lingkup feed (Semua, Mengikuti, Mutualan)
+  if (feedScopeFilter === "following") {
+    filtered = filtered.filter(post => post.uid === currentUser?.uid || userFollowingSet.has(post.uid));
+  } else if (feedScopeFilter === "mutual") {
+    filtered = filtered.filter(post => userFollowingSet.has(post.uid) && userFollowersSet.has(post.uid));
+  }
+
+  // 2. Saring berdasarkan kata kunci (username atau caption)
+  const keyword = (feedSearchKeyword || "").trim().toLowerCase();
+  if (keyword.length > 0) {
+    filtered = filtered.filter(post => {
+      const username = safeText(post.username).toLowerCase();
+      const caption = safeText(post.caption).toLowerCase();
+      return username.includes(keyword) || caption.includes(keyword);
+    });
+  }
+
+  // Update visibilitas tombol bersihkan pencarian
+  if (clearBtn) {
+    clearBtn.hidden = keyword.length === 0;
+  }
+
+  // 3. Urutkan berdasarkan kriteria (newest, oldest, az, za, likes, comments)
+  filtered.sort((a, b) => {
+    switch (feedSortCriteria) {
+      case "oldest":
+        return getPostTimestamp(a) - getPostTimestamp(b);
+      case "az": {
+        const cmp = safeText(a.username).localeCompare(safeText(b.username), "id", { sensitivity: "base" });
+        return cmp !== 0 ? cmp : getPostTimestamp(b) - getPostTimestamp(a);
+      }
+      case "za": {
+        const cmp = safeText(b.username).localeCompare(safeText(a.username), "id", { sensitivity: "base" });
+        return cmp !== 0 ? cmp : getPostTimestamp(b) - getPostTimestamp(a);
+      }
+      case "likes": {
+        const diff = getPostLikesCount(b) - getPostLikesCount(a);
+        return diff !== 0 ? diff : getPostTimestamp(b) - getPostTimestamp(a);
+      }
+      case "comments": {
+        const diff = getPostCommentsCount(b) - getPostCommentsCount(a);
+        return diff !== 0 ? diff : getPostTimestamp(b) - getPostTimestamp(a);
+      }
+      case "newest":
+      default:
+        return getPostTimestamp(b) - getPostTimestamp(a);
+    }
+  });
+
+  // 4. Tampilkan status bar filter jika ada pencarian, filter ruang lingkup, atau pengurutan non-default
+  const hasActiveFilter = keyword.length > 0 || feedSortCriteria !== "newest" || feedScopeFilter !== "all";
+  if (statusRow) {
+    statusRow.hidden = !hasActiveFilter;
+  }
+  if (resultCountText) {
+    resultCountText.textContent = `Ditemukan ${filtered.length} postingan`;
+  }
+
+  // 5. Jika hasil pencarian tidak ditemukan
+  if (filtered.length === 0) {
+    if (emptySearchFeed) emptySearchFeed.hidden = false;
+    if (emptySearchText) {
+      if (keyword) {
+        emptySearchText.textContent = `Tidak ada postingan yang cocok dengan kata kunci "${safeText(feedSearchKeyword)}".`;
+      } else if (feedScopeFilter === "following") {
+        emptySearchText.textContent = "Belum ada postingan dari akun yang Anda ikuti. Coba ikuti pengguna lain di feed atau lewat Cari & Mutualan.";
+      } else if (feedScopeFilter === "mutual") {
+        emptySearchText.textContent = "Belum ada postingan dari akun mutualan Anda. Saling ikuti dengan pengguna lain untuk melihat momen mereka di sini.";
+      } else {
+        emptySearchText.textContent = "Tidak ada postingan yang sesuai dengan filter yang Anda pilih.";
+      }
+    }
+    feed.replaceChildren();
+    return;
+  }
+
+  if (emptySearchFeed) emptySearchFeed.hidden = true;
+
+  // 6. Render elemen kartu postingan menggunakan createPostCardElement
+  feed.replaceChildren();
+  filtered.forEach(post => {
+    feed.append(createPostCardElement(post));
+  });
+}
+
+function loadFeed() {
+  if (unsubscribeFeed) unsubscribeFeed();
+
+  const skeleton = $("feedSkeleton");
+  if (skeleton) skeleton.hidden = false;
+
+  const feedQuery = query(
+    collection(db, "posts"),
+    orderBy("createdAt", "desc")
+  );
+
+  unsubscribeFeed = onSnapshot(feedQuery, snapshot => {
+    if (skeleton) skeleton.hidden = true;
+
+    rawFeedPosts = [];
+    let myPostsCount = 0;
+
+    snapshot.forEach(postSnapshot => {
+      const post = postSnapshot.data();
+      const postItem = { id: postSnapshot.id, ...post };
+      rawFeedPosts.push(postItem);
+
+      if (currentUser && post.uid === currentUser.uid) {
+        myPostsCount++;
+      }
+
+      // Pre-fetch profil penulis jika belum ada di cache
+      if (post.uid && !userProfilesCache.has(post.uid)) {
+        fetchAndCacheUserProfile(post.uid);
+      }
+
+      // Aktifkan listener subkoleksi likes & comments secara real-time
+      ensurePostSubcollectionListeners(postSnapshot.id);
+    });
+
+    // Update jumlah postingan pengguna di kartu profil
+    $("profilePostCountBadge").textContent = `${myPostsCount} Postingan`;
+
+    // Render feed dengan filter dan urutan aktif
+    renderFilteredFeed();
+
+    // Jika tab tersimpan atau disembunyikan sedang terbuka, perbarui juga
+    if (activeProfileTab !== "my") {
+      renderProfileTabContent();
+    }
+  }, error => {
+    if (skeleton) skeleton.hidden = true;
+    console.error("Feed listener error detail:", error.code, error.message, error);
+    showToast("Feed gagal dimuat: " + (error.code ? `[${error.code}] ` : "") + "Periksa aturan keamanan Firestore.", "error");
+  });
+}
+
+// Listener Pencarian Feed (Real-time input)
+$("feedSearchInput")?.addEventListener("input", event => {
+  feedSearchKeyword = event.target.value;
+  renderFilteredFeed();
+});
+
+// Listener Tombol Bersihkan Pencarian
+$("clearSearchBtn")?.addEventListener("click", () => {
+  const input = $("feedSearchInput");
+  if (input) input.value = "";
+  feedSearchKeyword = "";
+  const clearBtn = $("clearSearchBtn");
+  if (clearBtn) clearBtn.hidden = true;
+  renderFilteredFeed();
+  input?.focus();
+});
+
+// Listener Pengurutan Feed
+$("feedSortSelect")?.addEventListener("change", event => {
+  feedSortCriteria = event.target.value;
+  renderFilteredFeed();
+});
+
+// Listener Filter Ruang Lingkup Feed (Semua / Mengikuti / Mutualan)
+document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const scope = btn.dataset.feedScope || "all";
+    feedScopeFilter = scope;
+    document.querySelectorAll(".feed-scope-btn").forEach(b => {
+      const active = b.dataset.feedScope === scope;
+      b.classList.toggle("is-active", active);
+      b.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    renderFilteredFeed();
+  });
+});
+
+// Reset Filter Pencarian, Ruang Lingkup & Pengurutan
+const handleResetFeedFilter = () => {
+  const input = $("feedSearchInput");
+  const select = $("feedSortSelect");
+  if (input) input.value = "";
+  if (select) select.value = "newest";
+  feedSearchKeyword = "";
+  feedSortCriteria = "newest";
+  feedScopeFilter = "all";
+  document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+    const isAll = btn.dataset.feedScope === "all";
+    btn.classList.toggle("is-active", isAll);
+    btn.setAttribute("aria-selected", isAll ? "true" : "false");
+  });
+  const clearBtn = $("clearSearchBtn");
+  if (clearBtn) clearBtn.hidden = true;
+  renderFilteredFeed();
+};
+
+$("resetFeedFilterBtn")?.addEventListener("click", handleResetFeedFilter);
+$("emptyResetFilterBtn")?.addEventListener("click", handleResetFeedFilter);
+
+/* ==========================================================================
+   10. MODAL WORKFLOW: LOGOUT, HAPUS POSTINGAN, & HAPUS AKUN
+   ========================================================================== */
+
+// --- A. LOGOUT ---
+$("logoutButton")?.addEventListener("click", () => {
+  openModal("logoutModal");
+});
+
+$("cancelLogoutBtn")?.addEventListener("click", () => {
+  closeModal("logoutModal");
+});
+
+$("confirmLogoutBtn")?.addEventListener("click", async () => {
+  closeModal("logoutModal");
+  try {
+    if (unsubscribeFeed) {
+      unsubscribeFeed();
+      unsubscribeFeed = null;
+    }
+    await signOut(auth);
+    currentUser = null;
+    currentProfile = null;
+    showToast("Anda telah keluar dari akun.", "info");
+  } catch (error) {
+    console.error("Logout error:", error);
+    showToast("Gagal keluar: " + error.message, "error");
+  }
+});
+
+// --- B. HAPUS POSTINGAN ---
+$("cancelDeletePostBtn")?.addEventListener("click", () => {
+  postToDeleteId = null;
+  closeModal("deletePostModal");
+});
+
+$("confirmDeletePostBtn")?.addEventListener("click", async () => {
+  if (!postToDeleteId || !currentUser) return;
+
+  const btn = $("confirmDeletePostBtn");
+  const spinner = btn?.querySelector(".spinner");
+  if (btn) btn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  try {
+    const postRef = doc(db, "posts", postToDeleteId);
+    const postSnap = await getDoc(postRef);
+
+    if (!postSnap.exists() || postSnap.data().uid !== currentUser.uid) {
+      throw new Error("Akses ditolak: Anda bukan pemilik postingan ini.");
+    }
+
+    const postData = postSnap.data();
+    await deleteDoc(postRef);
+
+    // Kompatibilitas jika postingan lama memiliki file Firebase Storage
+    if (postData.mediaPath && !postData.mediaPublicId && !postData.mediaUrl?.includes("cloudinary")) {
+      try {
+        await deleteObject(ref(storage, postData.mediaPath));
+      } catch (e) {
+        console.warn("Storage cleanup notice:", e);
+      }
+    }
+
+    closeModal("deletePostModal");
+    postToDeleteId = null;
+
+    if (postData.mediaPublicId) {
+      showToast("Postingan dihapus dari feed. (Catatan: file di Cloudinary tetap tersimpan karena penghapusan Cloudinary memerlukan API Secret di backend).", "success");
+    } else {
+      showToast("Postingan berhasil dihapus.", "success");
+    }
+  } catch (error) {
+    console.error("Delete post error detail:", error.code, error.message, error);
+    showToast("Gagal menghapus postingan: " + (error.code ? `[${error.code}] ` : "") + error.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+// --- C. HAPUS AKUN SECARA AMAN DENGAN VERIFIKASI KATA SANDI ---
+$("deleteAccountButton")?.addEventListener("click", () => {
+  const pwdInput = $("deleteAccountPassword");
+  if (pwdInput) pwdInput.value = "";
+  openModal("deleteAccountModal");
+});
+
+$("cancelDeleteAccountBtn")?.addEventListener("click", () => {
+  closeModal("deleteAccountModal");
+});
+
+$("confirmDeleteAccountBtn")?.addEventListener("click", async () => {
+  if (!currentUser || isDeletingAccount) return;
+
+  const pwdInput = $("deleteAccountPassword");
+  const password = pwdInput ? pwdInput.value : "";
+  const confirmBtn = $("confirmDeleteAccountBtn");
+  const spinner = confirmBtn?.querySelector(".spinner");
+
+  if (!password) {
+    showToast("Silakan masukkan kata sandi akun Anda untuk konfirmasi.", "warning");
+    pwdInput?.focus();
+    return;
+  }
+
+  isDeletingAccount = true;
+  if (confirmBtn) confirmBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  const user = currentUser;
+
+  try {
+    // 1. TAHAP 1: Re-autentikasi pengguna terlebih dahulu
+    // Jika kata sandi salah, proses langsung batal TANPA menghapus data apa pun di Firestore
+    const credential = EmailAuthProvider.credential(user.email, password);
+    await reauthenticateWithCredential(user, credential);
+  } catch (authErr) {
+    console.error("Re-authentication error detail:", authErr.code, authErr.message);
+    isDeletingAccount = false;
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+    showToast("Kata sandi salah. Verifikasi gagal, tidak ada data yang dihapus.", "error");
+    return;
+  }
+
+  // 2. TAHAP 2: Re-autentikasi berhasil, lanjutkan penghapusan postingan di Firestore
+  try {
+    const postsQuery = query(collection(db, "posts"), where("uid", "==", user.uid));
+    const postsSnapshot = await getDocs(postsQuery);
+    let hasCloudinaryMedia = false;
+
+    // Bersihkan file Firebase Storage lama jika ada
+    for (const item of postsSnapshot.docs) {
+      const p = item.data();
+      if (p.mediaPublicId) hasCloudinaryMedia = true;
+      if (p.mediaPath && !p.mediaPublicId && !p.mediaUrl?.includes("cloudinary")) {
+        try {
+          await deleteObject(ref(storage, p.mediaPath));
+        } catch (e) {
+          console.warn("Storage cleanup notice:", e);
+        }
+      }
+    }
+
+    // Hapus seluruh dokumen postingan menggunakan writeBatch
+    if (!postsSnapshot.empty) {
+      const BATCH_SIZE = 450;
+      const docs = postsSnapshot.docs;
+      for (let i = 0; i < docs.length; i += BATCH_SIZE) {
+        const chunk = docs.slice(i, i + BATCH_SIZE);
+        const batch = writeBatch(db);
+        for (const item of chunk) {
+          batch.delete(item.ref);
+        }
+        await batch.commit();
+      }
+    }
+
+    // 3. TAHAP 3: Hapus dokumen profil pengguna di Firestore
+    await deleteDoc(doc(db, "users", user.uid));
+
+    // 4. TAHAP 4: Hapus akun pengguna di Firebase Authentication
+    try {
+      await deleteUser(user);
+    } catch (authDeleteErr) {
+      console.error("Delete user auth error detail:", authDeleteErr);
+      closeModal("deleteAccountModal");
+      showToast("Data Firestore berhasil dihapus, namun penutupan akun Firebase Auth terkendala jaringan. Silakan keluar dan login ulang.", "warning");
+      isDeletingAccount = false;
+      return;
+    }
+
+    closeModal("deleteAccountModal");
+    showToast("Akun Anda berhasil dihapus secara permanen.", "success");
+  } catch (error) {
+    console.error("Delete account error detail:", error.code, error.message, error);
+    showToast("Gagal menyelesaikan penghapusan akun: " + (error.code ? `[${error.code}] ` : "") + error.message, "error");
+  } finally {
+    isDeletingAccount = false;
+    if (confirmBtn) confirmBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+/* ==========================================================================
+   11. PENGELOLA SUBKOLEKSI REAL-TIME (LIKES & COMMENTS PER POSTINGAN)
+   ========================================================================== */
+function ensurePostSubcollectionListeners(postId) {
+  if (postSubcollectionUnsubscribers.has(postId)) return;
+
+  const unsubLikes = onSnapshot(collection(db, "posts", postId, "likes"), snap => {
+    const isLiked = currentUser ? snap.docs.some(d => d.id === currentUser.uid) : false;
+    postLikesCache.set(postId, { count: snap.size, userLiked: isLiked });
+
+    // Perbarui elemen DOM tombol like di seluruh kartu postingan (feed utama & profile tabs)
+    const likeButtons = document.querySelectorAll(`.btn-like-post[data-post-id="${postId}"]`);
+    likeButtons.forEach(btn => {
+      btn.classList.toggle("is-active-like", isLiked);
+      btn.setAttribute("aria-label", isLiked ? "Batal menyukai" : "Sukai postingan");
+      const countEl = btn.querySelector(".post-like-count");
+      if (countEl) countEl.textContent = snap.size;
+      const svg = btn.querySelector("svg");
+      if (svg) svg.setAttribute("fill", isLiked ? "#ef4444" : "none");
+    });
+  }, err => console.warn("Likes listener notice:", postId, err));
+
+  const unsubComments = onSnapshot(collection(db, "posts", postId, "comments"), snap => {
+    postCommentsCache.set(postId, { count: snap.size });
+
+    // Perbarui elemen DOM tombol komentar di seluruh kartu postingan
+    const commentButtons = document.querySelectorAll(`.btn-comment-post[data-post-id="${postId}"]`);
+    commentButtons.forEach(btn => {
+      const countEl = btn.querySelector(".post-comment-count");
+      if (countEl) countEl.textContent = snap.size;
+    });
+  }, err => console.warn("Comments listener notice:", postId, err));
+
+  postSubcollectionUnsubscribers.set(postId, () => {
+    unsubLikes();
+    unsubComments();
+  });
+}
+
+function cleanupPostSubcollectionListeners() {
+  postSubcollectionUnsubscribers.forEach(unsub => unsub());
+  postSubcollectionUnsubscribers.clear();
+}
+
+/* ==========================================================================
+   12. FITUR 1: LIKE DAN UNLIKE POSTINGAN (REAL-TIME & CEGAH GANDA)
+   ========================================================================== */
+async function togglePostLike(postId) {
+  if (!currentUser || !currentProfile) {
+    showToast("Silakan masuk terlebih dahulu untuk menyukai postingan.", "warning");
+    return;
+  }
+
+  // Mencegah klik berulang saat request masih berlangsung
+  if (likingPostsSet.has(postId)) return;
+  likingPostsSet.add(postId);
+
+  const likeDocRef = doc(db, "posts", postId, "likes", currentUser.uid);
+
+  try {
+    const likeSnap = await getDoc(likeDocRef);
+    if (likeSnap.exists()) {
+      // Batalkan Like
+      await deleteDoc(likeDocRef);
+    } else {
+      // Berikan Like
+      await setDoc(likeDocRef, {
+        uid: currentUser.uid,
+        createdAt: serverTimestamp()
+      });
+
+      // Kirim notifikasi jika yang menyukai bukan pemilik postingan itu sendiri
+      const post = rawFeedPosts.find(p => p.id === postId);
+      if (post && post.uid && post.uid !== currentUser.uid) {
+        try {
+          const notifRef = doc(collection(db, "notifications"));
+          await setDoc(notifRef, {
+            recipientUid: post.uid,
+            senderUid: currentUser.uid,
+            senderUsername: currentProfile.username,
+            type: "like",
+            postId: postId,
+            commentId: "",
+            message: `${currentProfile.username} menyukai postingan Anda.`,
+            read: false,
+            createdAt: serverTimestamp()
+          });
+        } catch (notifErr) {
+          console.warn("Gagal membuat notifikasi Like:", notifErr);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Like toggle error:", error);
+    showToast("Gagal memperbarui Like: " + error.message, "error");
+  } finally {
+    likingPostsSet.delete(postId);
+  }
+}
+
+/* ==========================================================================
+   13. FITUR 2: KOMENTAR (REAL-TIME, AVATAR, WAKTU & HAPUS MILIK SENDIRI)
+   ========================================================================== */
+function openCommentModal(postId) {
+  const post = rawFeedPosts.find(p => p.id === postId);
+  if (!post) return;
+
+  activeCommentPost = post;
+
+  // Render preview ringkas postingan di header modal komentar
+  const authorUsername = safeText(post.username || "Pengguna");
+  const authorInitial = authorUsername.charAt(0).toUpperCase();
+
+  const authorAvatarEl = $("commentPostAuthorAvatar");
+  const cachedAuthor = (currentUser && post.uid === currentUser.uid)
+    ? currentProfile
+    : userProfilesCache.get(post.uid);
+
+  renderAvatarElement(authorAvatarEl, cachedAuthor?.photoURL, authorInitial, authorUsername);
+  $("commentPostAuthorName").textContent = authorUsername;
+
+  const snippet = post.caption ? safeText(post.caption) : (post.mediaUrl ? "[Media foto/video]" : "Postingan");
+  $("commentPostSnippet").textContent = snippet;
+
+  // Render avatar pengguna saat ini di bar input form komentar
+  const myInitial = (currentProfile?.username || "U").charAt(0).toUpperCase();
+  renderAvatarElement($("commentUserAvatar"), currentProfile?.photoURL, myInitial, currentProfile?.username);
+
+  // Reset form input komentar
+  const commentInput = $("commentInput");
+  if (commentInput) commentInput.value = "";
+  const counter = $("commentCharCounter");
+  if (counter) counter.textContent = "0/500";
+
+  openModal("commentModal");
+
+  // Dengarkan komentar real-time untuk postingan ini
+  listenToActivePostComments(postId);
+  setTimeout(() => commentInput?.focus(), 100);
+}
+
+function listenToActivePostComments(postId) {
+  if (unsubscribeActivePostComments) {
+    unsubscribeActivePostComments();
+    unsubscribeActivePostComments = null;
+  }
+
+  const commentsQuery = collection(db, "posts", postId, "comments");
+
+  unsubscribeActivePostComments = onSnapshot(commentsQuery, snapshot => {
+    const commentsList = $("commentModalList");
+    const emptyState = $("commentEmptyState");
+    if (!commentsList) return;
+
+    if (snapshot.empty) {
+      commentsList.replaceChildren();
+      if (emptyState) emptyState.hidden = false;
+      return;
+    }
+
+    if (emptyState) emptyState.hidden = true;
+
+    // Urutkan komentar berdasarkan createdAt ascending (komentar terlama di atas)
+    const comments = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+    comments.sort((a, b) => {
+      const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt?.seconds ? a.createdAt.seconds * 1000 : 0);
+      const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt?.seconds ? b.createdAt.seconds * 1000 : 0);
+      return timeA - timeB;
+    });
+
+    commentsList.replaceChildren();
+
+    comments.forEach(c => {
+      const item = document.createElement("div");
+      item.className = "comment-item";
+
+      const cUsername = safeText(c.username || "Pengguna");
+      const cInitial = cUsername.charAt(0).toUpperCase();
+      const cDate = formatDate(c.createdAt);
+
+      const avatarEl = document.createElement("div");
+      avatarEl.className = "avatar-mini comment-item-avatar";
+      renderAvatarElement(avatarEl, c.photoURL, cInitial, cUsername);
+
+      const contentBox = document.createElement("div");
+      contentBox.className = "comment-item-content";
+
+      const headerBox = document.createElement("div");
+      headerBox.className = "comment-item-header";
+
+      const authorWrap = document.createElement("div");
+      authorWrap.className = "comment-author-wrap";
+
+      const authorNameEl = document.createElement("span");
+      authorNameEl.className = "comment-author";
+      authorNameEl.textContent = cUsername;
+      authorNameEl.title = `Lihat profil @${cUsername}`;
+      authorNameEl.addEventListener("click", () => showUserProfilePreview(cUsername));
+
+      const timeEl = document.createElement("span");
+      timeEl.className = "comment-time";
+      timeEl.textContent = cDate;
+
+      authorWrap.append(authorNameEl, timeEl);
+      headerBox.append(authorWrap);
+
+      // Tombol hapus komentar milik sendiri
+      if (currentUser && c.uid === currentUser.uid) {
+        const deleteBtn = document.createElement("button");
+        deleteBtn.className = "btn-delete-comment";
+        deleteBtn.type = "button";
+        deleteBtn.title = "Hapus Komentar Saya";
+        deleteBtn.innerHTML = `
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"></polyline>
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+        `;
+        deleteBtn.addEventListener("click", () => deleteComment(postId, c.id));
+        headerBox.append(deleteBtn);
+      }
+
+      const textBox = document.createElement("p");
+      textBox.className = "comment-text";
+      textBox.innerHTML = parseMentionsToHtml(c.text);
+
+      contentBox.append(headerBox, textBox);
+      item.append(avatarEl, contentBox);
+      commentsList.append(item);
+    });
+
+    // Otomatis scroll ke komentar paling bawah
+    const modalBody = commentsList.closest(".comment-modal-body");
+    if (modalBody) {
+      modalBody.scrollTop = modalBody.scrollHeight;
+    }
+  }, err => {
+    console.error("Comment listener error:", err);
+  });
+}
+
+// Character counter textarea komentar
+$("commentInput")?.addEventListener("input", event => {
+  const counter = $("commentCharCounter");
+  if (counter) counter.textContent = `${event.target.value.length}/500`;
+});
+
+// Submit form kirim komentar
+$("commentForm")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (!currentUser || !currentProfile || !activeCommentPost) return;
+
+  const input = $("commentInput");
+  const text = input ? input.value.trim() : "";
+  const submitBtn = $("commentSubmitBtn");
+  const spinner = submitBtn?.querySelector(".spinner");
+
+  if (!text) {
+    showToast("Komentar tidak boleh kosong.", "warning");
+    return;
+  }
+
+  if (text.length > 500) {
+    showToast("Komentar maksimal 500 karakter.", "warning");
+    return;
+  }
+
+  if (submitBtn) submitBtn.disabled = true;
+  if (spinner) spinner.hidden = false;
+
+  const postId = activeCommentPost.id;
+  const postAuthorUid = activeCommentPost.uid;
+
+  try {
+    const commentRef = doc(collection(db, "posts", postId, "comments"));
+    await setDoc(commentRef, {
+      uid: currentUser.uid,
+      username: currentProfile.username,
+      photoURL: currentProfile.photoURL || "",
+      text: text,
+      createdAt: serverTimestamp()
+    });
+
+    input.value = "";
+    const counter = $("commentCharCounter");
+    if (counter) counter.textContent = "0/500";
+
+    // 1. Notifikasi komentar untuk pemilik postingan jika bukan diri sendiri
+    if (postAuthorUid && postAuthorUid !== currentUser.uid) {
+      const snippet = text.length > 50 ? text.slice(0, 47) + "..." : text;
+      try {
+        const notifRef = doc(collection(db, "notifications"));
+        await setDoc(notifRef, {
+          recipientUid: postAuthorUid,
+          senderUid: currentUser.uid,
+          senderUsername: currentProfile.username,
+          type: "comment",
+          postId: postId,
+          commentId: commentRef.id,
+          message: `${currentProfile.username} mengomentari postingan Anda: "${snippet}"`,
+          read: false,
+          createdAt: serverTimestamp()
+        });
+      } catch (notifErr) {
+        console.warn("Gagal membuat notifikasi komentar:", notifErr);
+      }
+    }
+
+    // 2. Notifikasi mention untuk pengguna yang di-mention dalam komentar
+    sendMentionNotifications(text, postId, commentRef.id).catch(err => {
+      console.warn("Mention notifications notice:", err);
+    });
+
+    showToast("Komentar berhasil dikirim.", "success");
+  } catch (error) {
+    console.error("Save comment error:", error);
+    showToast("Gagal mengirim komentar: " + error.message, "error");
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+    if (spinner) spinner.hidden = true;
+  }
+});
+
+async function deleteComment(postId, commentId) {
+  if (!currentUser) return;
+  try {
+    await deleteDoc(doc(db, "posts", postId, "comments", commentId));
+    showToast("Komentar berhasil dihapus.", "success");
+  } catch (err) {
+    console.error("Delete comment error:", err);
+    showToast("Gagal menghapus komentar: " + err.message, "error");
+  }
+}
+
+/* ==========================================================================
+   14. FITUR 3: MENTION @USERNAME & PREVIEW PROFIL PENGGUNA
+   ========================================================================== */
+function parseMentionsToHtml(text) {
+  if (!text) return "";
+  // Escape HTML untuk mencegah XSS
+  const div = document.createElement("div");
+  div.textContent = text;
+  const escaped = div.innerHTML;
+
+  // Ganti @username dengan elemen interaktif .mention-tag
+  return escaped.replace(/@([a-zA-Z0-9_.]{3,30})/g, (match, username) => {
+    return `<span class="mention-tag" data-username="${username}">@${username}</span>`;
+  });
+}
+
+function extractMentions(text) {
+  if (!text) return [];
+  const matches = text.match(/@([a-zA-Z0-9_.]{3,30})/g);
+  if (!matches) return [];
+  // Pertahankan huruf asli sambil hilangkan duplikasi secara case-insensitive
+  const seen = new Set();
+  const usernames = [];
+  for (const raw of matches) {
+    const clean = raw.slice(1);
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      usernames.push(clean);
+    }
+  }
+  return usernames;
+}
+
+async function findUserByUsername(username) {
+  const cleanUsername = (username || "").replace(/^@/, "").trim();
+  if (!cleanUsername) return null;
+
+  // 1. Cari kecocokan persis di Firestore
+  const exactSnap = await getDocs(query(collection(db, "users"), where("username", "==", cleanUsername)));
+  if (!exactSnap.empty) {
+    const docSnap = exactSnap.docs[0];
+    return { uid: docSnap.id, data: docSnap.data() };
+  }
+
+  // 2. Fallback case-insensitive melalui cache profil & feed yang sudah dimuat
+  const targetLower = cleanUsername.toLowerCase();
+  let matchedUid = null;
+
+  for (const [uid, cached] of userProfilesCache.entries()) {
+    if (cached?.username && cached.username.toLowerCase() === targetLower) {
+      matchedUid = uid;
+      break;
+    }
+  }
+
+  if (!matchedUid) {
+    const postMatch = rawFeedPosts.find(p => p.uid && p.username && p.username.toLowerCase() === targetLower);
+    if (postMatch) matchedUid = postMatch.uid;
+  }
+
+  if (!matchedUid) return null;
+
+  const userSnap = await getDoc(doc(db, "users", matchedUid));
+  if (!userSnap.exists()) return null;
+  return { uid: userSnap.id, data: userSnap.data() };
+}
+
+async function sendMentionNotifications(text, postId, commentId = "") {
+  if (!currentUser || !currentProfile) return;
+  const usernames = extractMentions(text);
+  if (usernames.length === 0) return;
+
+  for (const username of usernames) {
+    // Jangan kirim notifikasi ke diri sendiri
+    if (username.toLowerCase() === (currentProfile.username || "").toLowerCase()) continue;
+
+    try {
+      const found = await findUserByUsername(username);
+      if (found) {
+        const targetUid = found.uid;
+
+        // Validasi keamanan: jangan kirim ke diri sendiri
+        if (targetUid === currentUser.uid) continue;
+
+        const notifRef = doc(collection(db, "notifications"));
+        await setDoc(notifRef, {
+          recipientUid: targetUid,
+          senderUid: currentUser.uid,
+          senderUsername: currentProfile.username,
+          type: "mention",
+          postId: postId,
+          commentId: commentId || "",
+          message: `${currentProfile.username} menyebut Anda dalam sebuah ${commentId ? "komentar" : "postingan"}.`,
+          read: false,
+          createdAt: serverTimestamp()
+        });
+      }
+    } catch (err) {
+      console.warn("Gagal mengirim notifikasi mention ke @" + username, err);
+    }
+  }
+}
+
+// Event delegation klik untuk seluruh .mention-tag di aplikasi
+document.addEventListener("click", event => {
+  const mentionEl = event.target.closest(".mention-tag");
+  if (mentionEl) {
+    event.preventDefault();
+    event.stopPropagation();
+    const username = mentionEl.dataset.username || mentionEl.textContent.replace("@", "").trim();
+    if (username) {
+      showUserProfilePreview(username);
+    }
+  }
+});
+
+let previewedProfileUsername = "";
+
+$("userPreviewViewPostsBtn")?.addEventListener("click", () => {
+  const targetUsername = previewedProfileUsername;
+  closeModal("userPreviewModal");
+  if (!targetUsername) return;
+
+  if (activeProfileTab !== "my") {
+    switchProfileTab("my");
+  }
+
+  const searchInput = $("feedSearchInput");
+  if (searchInput) searchInput.value = targetUsername;
+  feedSearchKeyword = targetUsername;
+  feedScopeFilter = "all";
+  document.querySelectorAll(".feed-scope-btn").forEach(btn => {
+    const isAll = btn.dataset.feedScope === "all";
+    btn.classList.toggle("is-active", isAll);
+    btn.setAttribute("aria-selected", isAll ? "true" : "false");
+  });
+  renderFilteredFeed();
+
+  $("feed")?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+$("userPreviewFollowBtn")?.addEventListener("click", () => {
+  const btn = $("userPreviewFollowBtn");
+  const targetUid = btn?.dataset.targetUid;
+  const targetUsername = btn?.dataset.targetUsername || previewedProfileUsername;
+  if (targetUid) {
+    toggleFollowUser(targetUid, targetUsername);
+  }
+});
+
+async function showUserProfilePreview(username) {
+  if (!username) return;
+  const cleanUsername = username.replace(/^@/, "").trim();
+
+  try {
+    const found = await findUserByUsername(cleanUsername);
+
+    if (!found) {
+      showToast(`Pengguna @${cleanUsername} tidak ditemukan.`, "warning");
+      return;
+    }
+
+    const userData = found.data;
+    const userUid = found.uid;
+    const initial = (userData.username || "U").charAt(0).toUpperCase();
+    previewedProfileUsername = userData.username || "";
+    previewedProfileUid = userUid;
+
+    $("userPreviewTitle").textContent = `Profil @${userData.username}`;
+    renderAvatarElement($("userPreviewAvatar"), userData.photoURL, initial, userData.username);
+    $("userPreviewUsername").textContent = `@${userData.username}`;
+    $("userPreviewBio").textContent = userData.bio || "Belum ada bio.";
+
+    const [postsSnap, followersSnap, followingSnap] = await Promise.all([
+      getDocs(query(collection(db, "posts"), where("uid", "==", userUid))),
+      getDocs(collection(db, "users", userUid, "followers")),
+      getDocs(collection(db, "users", userUid, "following"))
+    ]);
+
+    $("userPreviewPostsCount").textContent = `${postsSnap.size} Postingan`;
+    if ($("userPreviewFollowersCount")) {
+      $("userPreviewFollowersCount").textContent = `${followersSnap.size} Pengikut`;
+    }
+    if ($("userPreviewFollowingCount")) {
+      $("userPreviewFollowingCount").textContent = `${followingSnap.size} Mengikuti`;
+    }
+
+    const relationBadge = $("userPreviewRelationBadge");
+    const previewFollowBtn = $("userPreviewFollowBtn");
+    const isSelf = currentUser && userUid === currentUser.uid;
+
+    if (isSelf) {
+      if (relationBadge) relationBadge.hidden = true;
+      if (previewFollowBtn) previewFollowBtn.hidden = true;
+    } else {
+      const relation = getFollowRelation(userUid);
+      if (relationBadge) {
+        if (relation.isMutual) {
+          relationBadge.textContent = "Mutualan";
+          relationBadge.hidden = false;
+        } else if (relation.followsMe) {
+          relationBadge.textContent = "Mengikuti Anda";
+          relationBadge.hidden = false;
+        } else {
+          relationBadge.hidden = true;
+        }
+      }
+      if (previewFollowBtn) {
+        previewFollowBtn.hidden = false;
+        previewFollowBtn.dataset.targetUid = userUid;
+        previewFollowBtn.dataset.targetUsername = userData.username || "";
+        applyFollowButtonUI(previewFollowBtn, userUid);
+      }
+    }
+
+    const viewPostsBtn = $("userPreviewViewPostsBtn");
+    if (viewPostsBtn) {
+      viewPostsBtn.hidden = postsSnap.size === 0;
+    }
+
+    openModal("userPreviewModal");
+  } catch (err) {
+    console.error("Show profile error:", err);
+    showToast("Gagal memuat profil pengguna: " + err.message, "error");
+  }
+}
+
+/* ==========================================================================
+   15. FITUR 4: NOTIFIKASI REAL-TIME (LIKE, KOMENTAR, MENTION & MARK READ)
+   ========================================================================== */
+function listenToNotifications() {
+  if (unsubscribeNotifications) {
+    unsubscribeNotifications();
+    unsubscribeNotifications = null;
+  }
+  if (!currentUser) return;
+
+  const notifQuery = query(
+    collection(db, "notifications"),
+    where("recipientUid", "==", currentUser.uid)
+  );
+
+  unsubscribeNotifications = onSnapshot(notifQuery, snapshot => {
+    rawNotifications = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }));
+
+    // Urutkan notifikasi terbaru di paling atas
+    rawNotifications.sort((a, b) => {
+      const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt?.seconds ? a.createdAt.seconds * 1000 : 0);
+      const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt?.seconds ? b.createdAt.seconds * 1000 : 0);
+      return timeB - timeA;
+    });
+
+    const unreadCount = rawNotifications.filter(n => !n.read).length;
+    const badge = $("navNotificationBadge");
+    if (badge) {
+      if (unreadCount > 0) {
+        badge.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
+        badge.hidden = false;
+      } else {
+        badge.hidden = true;
+      }
+    }
+
+    // Jika modal notifikasi sedang terbuka, render ulang daftar
+    const modal = $("notificationModal");
+    if (modal && modal.classList.contains("is-open")) {
+      renderNotificationList();
+    }
+  }, err => {
+    console.error("Notifications listener error:", err);
+  });
+}
+
+function renderNotificationList() {
+  const container = $("notificationList");
+  const emptyState = $("notificationEmptyState");
+  if (!container) return;
+
+  if (rawNotifications.length === 0) {
+    container.replaceChildren();
+    if (emptyState) emptyState.hidden = false;
+    return;
+  }
+
+  if (emptyState) emptyState.hidden = true;
+  container.replaceChildren();
+
+  const typeIcons = {
+    like: `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>`,
+    comment: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>`,
+    mention: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94"></path></svg>`,
+    follow: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>`
+  };
+
+  rawNotifications.forEach(notif => {
+    const item = document.createElement("div");
+    item.className = `notification-item ${!notif.read ? "is-unread" : ""}`;
+
+    const iconWrap = document.createElement("div");
+    iconWrap.className = `notification-icon-wrap type-${notif.type || 'like'}`;
+    iconWrap.innerHTML = typeIcons[notif.type] || typeIcons.like;
+
+    const body = document.createElement("div");
+    body.className = "notification-body";
+
+    const text = document.createElement("p");
+    text.className = "notification-text";
+    text.textContent = notif.message || "Aktivitas baru";
+
+    const time = document.createElement("div");
+    time.className = "notification-time";
+    time.textContent = formatDate(notif.createdAt);
+
+    body.append(text, time);
+    item.append(iconWrap, body);
+
+    item.addEventListener("click", async () => {
+      // Tandai sudah dibaca jika belum
+      if (!notif.read) {
+        try {
+          await updateDoc(doc(db, "notifications", notif.id), { read: true });
+        } catch (e) {
+          console.warn("Update notif read error:", e);
+        }
+      }
+
+      closeModal("notificationModal");
+
+      // Arahkan ke postingan terkait jika ada
+      if (notif.postId) {
+        if (activeProfileTab !== "my") {
+          switchProfileTab("my");
+        }
+
+        setTimeout(() => {
+          const postCard = document.querySelector(`.post-card[data-post-id="${notif.postId}"]`);
+          if (postCard) {
+            postCard.scrollIntoView({ behavior: "smooth", block: "center" });
+            postCard.classList.remove("post-highlight");
+            void postCard.offsetWidth; // Trigger reflow
+            postCard.classList.add("post-highlight");
+            setTimeout(() => postCard.classList.remove("post-highlight"), 2600);
+          }
+
+          if (notif.type === "comment") {
+            setTimeout(() => openCommentModal(notif.postId), 400);
+          }
+        }, 300);
+      } else if (notif.type === "follow" && notif.senderUsername) {
+        setTimeout(() => showUserProfilePreview(notif.senderUsername), 220);
+      }
+    });
+
+    container.append(item);
+  });
+}
+
+$("navNotificationBtn")?.addEventListener("click", () => {
+  renderNotificationList();
+  openModal("notificationModal");
+});
+
+$("markAllReadBtn")?.addEventListener("click", async () => {
+  const unreadDocs = rawNotifications.filter(n => !n.read);
+  if (unreadDocs.length === 0) return;
+
+  try {
+    const BATCH_SIZE = 450;
+    for (let i = 0; i < unreadDocs.length; i += BATCH_SIZE) {
+      const chunk = unreadDocs.slice(i, i + BATCH_SIZE);
+      const batch = writeBatch(db);
+      for (const item of chunk) {
+        batch.update(doc(db, "notifications", item.id), { read: true });
+      }
+      await batch.commit();
+    }
+    showToast("Semua notifikasi ditandai telah dibaca.", "success");
+  } catch (err) {
+    console.error("Mark all read error:", err);
+    showToast("Gagal memperbarui notifikasi: " + err.message, "error");
+  }
+});
+
+/* ==========================================================================
+   16. FITUR 5 & 6: BOOKMARK (TERSIMPAN) & HIDE POST (DISEMBUNYIKAN)
+   ========================================================================== */
+function listenToUserBookmarks() {
+  if (unsubscribeBookmarks) {
+    unsubscribeBookmarks();
+    unsubscribeBookmarks = null;
+  }
+  if (!currentUser) return;
+
+  const bookmarksCol = collection(db, "users", currentUser.uid, "bookmarks");
+  unsubscribeBookmarks = onSnapshot(bookmarksCol, snapshot => {
+    userBookmarksSet = new Set(snapshot.docs.map(docSnap => docSnap.id));
+    updateProfileBadges();
+
+    // Perbarui status tombol bookmark di DOM kartu postingan
+    document.querySelectorAll(".btn-bookmark-post").forEach(btn => {
+      const postId = btn.dataset.postId;
+      const isBookmarked = userBookmarksSet.has(postId);
+      btn.classList.toggle("is-active-bookmark", isBookmarked);
+      btn.title = isBookmarked ? "Batalkan Simpan" : "Simpan Postingan";
+      btn.setAttribute("aria-label", btn.title);
+      const svg = btn.querySelector("svg");
+      if (svg) svg.setAttribute("fill", isBookmarked ? "#f59e0b" : "none");
+    });
+
+    if (activeProfileTab === "saved") {
+      renderProfileTabContent();
+    }
+  }, err => {
+    console.error("Bookmarks listener error:", err);
+  });
+}
+
+async function togglePostBookmark(postId) {
+  if (!currentUser) {
+    showToast("Silakan masuk untuk menyimpan postingan.", "warning");
+    return;
+  }
+
+  if (bookmarkingPostsSet.has(postId)) return;
+  bookmarkingPostsSet.add(postId);
+
+  const bookmarkDocRef = doc(db, "users", currentUser.uid, "bookmarks", postId);
+
+  try {
+    const isBookmarked = userBookmarksSet.has(postId);
+    if (isBookmarked) {
+      await deleteDoc(bookmarkDocRef);
+      userBookmarksSet.delete(postId);
+      showToast("Postingan dihapus dari koleksi tersimpan.", "info");
+    } else {
+      await setDoc(bookmarkDocRef, {
+        postId: postId,
+        createdAt: serverTimestamp()
+      });
+      userBookmarksSet.add(postId);
+      showToast("Postingan disimpan ke koleksi tersimpan.", "success");
+    }
+
+    updateProfileBadges();
+
+    // Perbarui ikon bookmark di DOM kartu postingan terkait
+    document.querySelectorAll(`.btn-bookmark-post[data-post-id="${postId}"]`).forEach(btn => {
+      const bookmarkedNow = userBookmarksSet.has(postId);
+      btn.classList.toggle("is-active-bookmark", bookmarkedNow);
+      btn.title = bookmarkedNow ? "Batalkan Simpan" : "Simpan Postingan";
+      btn.setAttribute("aria-label", btn.title);
+      const svg = btn.querySelector("svg");
+      if (svg) svg.setAttribute("fill", bookmarkedNow ? "#f59e0b" : "none");
+    });
+
+    if (activeProfileTab === "saved") {
+      renderProfileTabContent();
+    }
+  } catch (error) {
+    console.error("Bookmark toggle error:", error);
+    showToast("Gagal mengubah bookmark: " + error.message, "error");
+  } finally {
+    bookmarkingPostsSet.delete(postId);
+  }
+}
+
+function listenToUserHiddenPosts() {
+  if (unsubscribeHiddenPosts) {
+    unsubscribeHiddenPosts();
+    unsubscribeHiddenPosts = null;
+  }
+  if (!currentUser) return;
+
+  const hiddenCol = collection(db, "users", currentUser.uid, "hiddenPosts");
+  unsubscribeHiddenPosts = onSnapshot(hiddenCol, snapshot => {
+    userHiddenPostsSet = new Set(snapshot.docs.map(docSnap => docSnap.id));
+    updateProfileBadges();
+
+    // Re-render feed utama agar postingan yang baru disembunyikan langsung hilang
+    renderFilteredFeed();
+
+    if (activeProfileTab === "hidden") {
+      renderProfileTabContent();
+    }
+  }, err => {
+    console.error("Hidden posts listener error:", err);
+  });
+}
+
+async function hidePostFromFeed(postId) {
+  if (!currentUser) return;
+
+  if (hidingPostsSet.has(postId)) return;
+  hidingPostsSet.add(postId);
+
+  const hideDocRef = doc(db, "users", currentUser.uid, "hiddenPosts", postId);
+
+  try {
+    await setDoc(hideDocRef, {
+      postId: postId,
+      createdAt: serverTimestamp()
+    });
+
+    userHiddenPostsSet.add(postId);
+    updateProfileBadges();
+    showToast("Postingan disembunyikan dari feed Anda.", "info");
+
+    // Saring dan perbarui tampilan feed
+    renderFilteredFeed();
+
+    if (activeProfileTab === "hidden") {
+      renderProfileTabContent();
+    }
+  } catch (error) {
+    console.error("Hide post error:", error);
+    showToast("Gagal menyembunyikan postingan: " + error.message, "error");
+  } finally {
+    hidingPostsSet.delete(postId);
+  }
+}
+
+async function unhidePostFromFeed(postId) {
+  if (!currentUser) return;
+
+  if (hidingPostsSet.has(postId)) return;
+  hidingPostsSet.add(postId);
+
+  const hideDocRef = doc(db, "users", currentUser.uid, "hiddenPosts", postId);
+
+  try {
+    await deleteDoc(hideDocRef);
+    userHiddenPostsSet.delete(postId);
+    updateProfileBadges();
+    showToast("Postingan berhasil ditampilkan kembali di feed.", "success");
+
+    // Re-render feed utama dan tab hidden
+    renderFilteredFeed();
+
+    if (activeProfileTab === "hidden") {
+      renderProfileTabContent();
+    }
+  } catch (error) {
+    console.error("Unhide post error:", error);
+    showToast("Gagal mengembalikan postingan: " + error.message, "error");
+  } finally {
+    hidingPostsSet.delete(postId);
+  }
+}
+
+/* ==========================================================================
+   17. TAB PROFIL: POSTINGAN SAYA, TERSIMPAN, & DISEMBUNYIKAN
+   ========================================================================== */
+function updateProfileBadges() {
+  const savedBadge = $("profileSavedCountBadge");
+  if (savedBadge) {
+    savedBadge.textContent = userBookmarksSet.size;
+    savedBadge.hidden = userBookmarksSet.size === 0;
+  }
+  const hiddenBadge = $("profileHiddenCountBadge");
+  if (hiddenBadge) {
+    hiddenBadge.textContent = userHiddenPostsSet.size;
+    hiddenBadge.hidden = userHiddenPostsSet.size === 0;
+  }
+}
+
+function switchProfileTab(tabName) {
+  activeProfileTab = tabName;
+  const tabMy = $("tabMyPostsBtn");
+  const tabSaved = $("tabSavedPostsBtn");
+  const tabHidden = $("tabHiddenPostsBtn");
+  const tabPanel = $("profileTabPanel");
+
+  tabMy?.classList.toggle("is-active", tabName === "my");
+  tabMy?.setAttribute("aria-selected", tabName === "my" ? "true" : "false");
+
+  tabSaved?.classList.toggle("is-active", tabName === "saved");
+  tabSaved?.setAttribute("aria-selected", tabName === "saved" ? "true" : "false");
+
+  tabHidden?.classList.toggle("is-active", tabName === "hidden");
+  tabHidden?.setAttribute("aria-selected", tabName === "hidden" ? "true" : "false");
+
+  if (tabName === "my") {
+    if (tabPanel) tabPanel.hidden = true;
+    renderFilteredFeed();
+  } else {
+    if (tabPanel) tabPanel.hidden = false;
+    renderProfileTabContent();
+  }
+}
+
+function renderProfileTabContent() {
+  const feed = $("profileTabFeed");
+  const emptyState = $("profileTabEmptyState");
+  const emptyTitle = $("profileTabEmptyTitle");
+  const emptyDesc = $("profileTabEmptyDesc");
+
+  if (!feed) return;
+
+  let targetPosts = [];
+
+  if (activeProfileTab === "saved") {
+    targetPosts = rawFeedPosts.filter(p => userBookmarksSet.has(p.id));
+    if (emptyTitle) emptyTitle.textContent = "Belum Ada Postingan Tersimpan";
+    if (emptyDesc) emptyDesc.textContent = "Postingan yang Anda bookmark akan tersimpan secara rapi dan pribadi di sini.";
+  } else if (activeProfileTab === "hidden") {
+    targetPosts = rawFeedPosts.filter(p => userHiddenPostsSet.has(p.id));
+    if (emptyTitle) emptyTitle.textContent = "Tidak Ada Postingan Disembunyikan";
+    if (emptyDesc) emptyDesc.textContent = "Postingan yang Anda sembunyikan dari feed akan muncul di sini dan dapat dikembalikan kapan saja.";
+  }
+
+  if (targetPosts.length === 0) {
+    feed.replaceChildren();
+    if (emptyState) emptyState.hidden = false;
+    return;
+  }
+
+  if (emptyState) emptyState.hidden = true;
+  feed.replaceChildren();
+
+  targetPosts.forEach(post => {
+    feed.append(createPostCardElement(post, {
+      showUnhideBtn: activeProfileTab === "hidden"
+    }));
+  });
+}
+
+$("tabMyPostsBtn")?.addEventListener("click", () => switchProfileTab("my"));
+$("tabSavedPostsBtn")?.addEventListener("click", () => switchProfileTab("saved"));
+$("tabHiddenPostsBtn")?.addEventListener("click", () => switchProfileTab("hidden"));
+
+/* ==========================================================================
+   18. FITUR 7: FOLLOW, PENGIKUT, & MUTUALAN REAL-TIME
+   ========================================================================== */
+function getFollowRelation(targetUid) {
+  const isFollowing = Boolean(targetUid && userFollowingSet.has(targetUid));
+  const followsMe = Boolean(targetUid && userFollowersSet.has(targetUid));
+  return {
+    isFollowing,
+    followsMe,
+    isMutual: isFollowing && followsMe
+  };
+}
+
+function getFollowButtonConfig(relation) {
+  if (relation.isMutual) {
+    return { label: "Mutual", extraClass: "is-mutual", title: "Kalian saling mengikuti (klik untuk berhenti mengikuti)" };
+  }
+  if (relation.isFollowing) {
+    return { label: "Mengikuti", extraClass: "is-following", title: "Berhenti mengikuti" };
+  }
+  if (relation.followsMe) {
+    return { label: "Ikuti Balik", extraClass: "is-follow-back", title: "Pengguna ini mengikuti Anda — klik untuk mutualan" };
+  }
+  return { label: "+ Ikuti", extraClass: "", title: "Ikuti pengguna ini" };
+}
+
+function applyFollowButtonUI(btn, targetUid) {
+  if (!btn || !targetUid) return;
+  const relation = getFollowRelation(targetUid);
+  const { label, extraClass, title } = getFollowButtonConfig(relation);
+
+  btn.classList.remove("is-mutual", "is-following", "is-follow-back");
+  if (extraClass) btn.classList.add(extraClass);
+  btn.textContent = label;
+  btn.title = title;
+  btn.disabled = followingInFlightSet.has(targetUid);
+}
+
+function updateFollowButtonsInDom(targetUid) {
+  document.querySelectorAll(`.btn-follow-pill[data-target-uid="${targetUid}"]`).forEach(btn => {
+    applyFollowButtonUI(btn, targetUid);
+  });
+
+  const previewFollowBtn = $("userPreviewFollowBtn");
+  if (previewFollowBtn && !previewFollowBtn.hidden && previewFollowBtn.dataset.targetUid === targetUid) {
+    applyFollowButtonUI(previewFollowBtn, targetUid);
+    const relation = getFollowRelation(targetUid);
+    const relationBadge = $("userPreviewRelationBadge");
+    if (relationBadge) {
+      if (relation.isMutual) {
+        relationBadge.textContent = "Mutualan";
+        relationBadge.hidden = false;
+      } else if (relation.followsMe) {
+        relationBadge.textContent = "Mengikuti Anda";
+        relationBadge.hidden = false;
+      } else {
+        relationBadge.hidden = true;
+      }
+    }
+  }
+}
+
+function getMutualUidList() {
+  return Array.from(userFollowingSet).filter(uid => userFollowersSet.has(uid));
+}
+
+function updateProfileSocialCounters() {
+  const followersBtn = $("profileFollowersBtn");
+  const followingBtn = $("profileFollowingBtn");
+  const mutualBtn = $("profileMutualBtn");
+
+  if (followersBtn) followersBtn.textContent = `${userFollowersSet.size} Pengikut`;
+  if (followingBtn) followingBtn.textContent = `${userFollowingSet.size} Mengikuti`;
+  if (mutualBtn) mutualBtn.textContent = `${getMutualUidList().length} Mutual`;
+
+  const modal = $("connectionsModal");
+  if (modal && modal.classList.contains("is-open")) {
+    renderConnectionsList();
+  }
+}
+
+function listenToUserFollowing() {
+  if (unsubscribeFollowing) {
+    unsubscribeFollowing();
+    unsubscribeFollowing = null;
+  }
+  if (!currentUser) return;
+
+  const followingCol = collection(db, "users", currentUser.uid, "following");
+  unsubscribeFollowing = onSnapshot(followingCol, snapshot => {
+    userFollowingSet = new Set(snapshot.docs.map(d => d.id));
+    updateProfileSocialCounters();
+    document.querySelectorAll(".btn-follow-pill[data-target-uid]").forEach(btn => {
+      applyFollowButtonUI(btn, btn.dataset.targetUid);
+    });
+    if (feedScopeFilter !== "all") {
+      renderFilteredFeed();
+    }
+  }, err => {
+    console.warn("Following listener error:", err);
+  });
+}
+
+function listenToUserFollowers() {
+  if (unsubscribeFollowers) {
+    unsubscribeFollowers();
+    unsubscribeFollowers = null;
+  }
+  if (!currentUser) return;
+
+  const followersCol = collection(db, "users", currentUser.uid, "followers");
+  unsubscribeFollowers = onSnapshot(followersCol, snapshot => {
+    userFollowersSet = new Set(snapshot.docs.map(d => d.id));
+    updateProfileSocialCounters();
+    document.querySelectorAll(".btn-follow-pill[data-target-uid]").forEach(btn => {
+      applyFollowButtonUI(btn, btn.dataset.targetUid);
+    });
+    if (feedScopeFilter === "mutual") {
+      renderFilteredFeed();
+    }
+  }, err => {
+    console.warn("Followers listener error:", err);
+  });
+}
+
+async function toggleFollowUser(targetUid, targetUsername = "Pengguna") {
+  if (!currentUser || !currentProfile) {
+    showToast("Silakan masuk terlebih dahulu untuk mengikuti pengguna.", "warning");
+    return;
+  }
+  if (!targetUid || targetUid === currentUser.uid) return;
+  if (followingInFlightSet.has(targetUid)) return;
+
+  followingInFlightSet.add(targetUid);
+  const wasFollowing = userFollowingSet.has(targetUid);
+  const followsMe = userFollowersSet.has(targetUid);
+
+  if (wasFollowing) {
+    userFollowingSet.delete(targetUid);
+  } else {
+    userFollowingSet.add(targetUid);
+  }
+  updateFollowButtonsInDom(targetUid);
+  updateProfileSocialCounters();
+
+  const myFollowingRef = doc(db, "users", currentUser.uid, "following", targetUid);
+  const targetFollowerRef = doc(db, "users", targetUid, "followers", currentUser.uid);
+
+  try {
+    const batch = writeBatch(db);
+    if (wasFollowing) {
+      batch.delete(myFollowingRef);
+      batch.delete(targetFollowerRef);
+    } else {
+      batch.set(myFollowingRef, {
+        targetUid: targetUid,
+        createdAt: serverTimestamp()
+      });
+      batch.set(targetFollowerRef, {
+        uid: currentUser.uid,
+        createdAt: serverTimestamp()
+      });
+    }
+    await batch.commit();
+
+    if (wasFollowing) {
+      showToast(`Berhenti mengikuti @${targetUsername}.`, "info");
+    } else {
+      const becameMutual = followsMe;
+      showToast(
+        becameMutual
+          ? `Anda dan @${targetUsername} sekarang mutualan!`
+          : `Anda mulai mengikuti @${targetUsername}.`,
+        "success"
+      );
+
+      // Kirim notifikasi follow ke pengguna target
+      try {
+        const notifRef = doc(collection(db, "notifications"));
+        await setDoc(notifRef, {
+          recipientUid: targetUid,
+          senderUid: currentUser.uid,
+          senderUsername: currentProfile.username,
+          type: "follow",
+          postId: "",
+          commentId: "",
+          message: becameMutual
+            ? `${currentProfile.username} mengikuti Anda balik! Kalian sekarang mutualan.`
+            : `${currentProfile.username} mulai mengikuti Anda.`,
+          read: false,
+          createdAt: serverTimestamp()
+        });
+      } catch (notifErr) {
+        console.warn("Gagal mengirim notifikasi follow:", notifErr);
+      }
+    }
+
+    if (previewedProfileUid === targetUid) {
+      const previewFollowersEl = $("userPreviewFollowersCount");
+      if (previewFollowersEl) {
+        const snap = await getDocs(collection(db, "users", targetUid, "followers"));
+        previewFollowersEl.textContent = `${snap.size} Pengikut`;
+      }
+    }
+
+    if (feedScopeFilter !== "all") {
+      renderFilteredFeed();
+    }
+  } catch (error) {
+    console.error("Follow toggle error:", error);
+    if (wasFollowing) {
+      userFollowingSet.add(targetUid);
+    } else {
+      userFollowingSet.delete(targetUid);
+    }
+    showToast("Gagal memperbarui ikuti: " + error.message, "error");
+  } finally {
+    followingInFlightSet.delete(targetUid);
+    updateFollowButtonsInDom(targetUid);
+    updateProfileSocialCounters();
+  }
+}
+
+async function fetchUserProfileData(uid) {
+  if (!uid) return null;
+  const cached = userProfilesCache.get(uid);
+  if (cached && cached.username) return { uid, ...cached };
+
+  try {
+    const snap = await getDoc(doc(db, "users", uid));
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    userProfilesCache.set(uid, data);
+    return { uid, ...data };
+  } catch (err) {
+    console.warn("Gagal memuat data pengguna:", uid, err);
+    return null;
+  }
+}
+
+async function renderConnectionsList() {
+  const listEl = $("connectionsList");
+  const emptyEl = $("connectionsEmptyState");
+  const emptyTitle = $("connectionsEmptyTitle");
+  const emptyDesc = $("connectionsEmptyDesc");
+  if (!listEl || !currentUser) return;
+
+  listEl.replaceChildren();
+  if (emptyEl) emptyEl.hidden = true;
+
+  let users = [];
+  if (activeConnectionsTab === "discover") {
+    try {
+      const snap = await getDocs(query(collection(db, "users"), limit(50)));
+      snap.forEach(docSnap => {
+        if (docSnap.id !== currentUser.uid) {
+          const data = docSnap.data();
+          userProfilesCache.set(docSnap.id, data);
+          users.push({ uid: docSnap.id, ...data });
+        }
+      });
+    } catch (err) {
+      console.error("Load discover users error:", err);
+      showToast("Gagal memuat daftar pengguna: " + err.message, "error");
+    }
+  } else {
+    let targetUids = [];
+    if (activeConnectionsTab === "mutual") {
+      targetUids = getMutualUidList();
+    } else if (activeConnectionsTab === "followers") {
+      targetUids = Array.from(userFollowersSet);
+    } else if (activeConnectionsTab === "following") {
+      targetUids = Array.from(userFollowingSet);
+    }
+    const fetched = await Promise.all(targetUids.map(uid => fetchUserProfileData(uid)));
+    users = fetched.filter(Boolean);
+  }
+
+  if (users.length === 0) {
+    if (emptyEl) {
+      emptyEl.hidden = false;
+      if (activeConnectionsTab === "mutual") {
+        if (emptyTitle) emptyTitle.textContent = "Belum Ada Mutualan";
+        if (emptyDesc) emptyDesc.textContent = "Saling ikuti dengan pengguna lain di feed atau tab Temukan Orang untuk menjadi mutual.";
+      } else if (activeConnectionsTab === "followers") {
+        if (emptyTitle) emptyTitle.textContent = "Belum Ada Pengikut";
+        if (emptyDesc) emptyDesc.textContent = "Pengguna yang mengikuti akun Anda akan tampil di sini.";
+      } else if (activeConnectionsTab === "following") {
+        if (emptyTitle) emptyTitle.textContent = "Belum Mengikuti Siapa Pun";
+        if (emptyDesc) emptyDesc.textContent = "Buka tab Temukan Orang untuk mengikuti pengguna lain.";
+      } else {
+        if (emptyTitle) emptyTitle.textContent = "Belum Ada Pengguna Lain";
+        if (emptyDesc) emptyDesc.textContent = "Pengguna baru yang mendaftar di InstaLite akan tampil di sini.";
+      }
+    }
+    return;
+  }
+
+  users.sort((a, b) => safeText(a.username).localeCompare(safeText(b.username), "id", { sensitivity: "base" }));
+
+  users.forEach(user => {
+    const item = document.createElement("div");
+    item.className = "connection-item";
+
+    const info = document.createElement("div");
+    info.className = "connection-user-info";
+    info.title = `Lihat profil @${safeText(user.username)}`;
+    info.addEventListener("click", () => {
+      closeModal("connectionsModal");
+      if (user.username) showUserProfilePreview(user.username);
+    });
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar-mini";
+    const username = safeText(user.username || "Pengguna");
+    renderAvatarElement(avatar, user.photoURL, username.charAt(0).toUpperCase(), username);
+
+    const meta = document.createElement("div");
+    meta.className = "connection-user-meta";
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "connection-username";
+    nameEl.textContent = `@${username}`;
+
+    const bioEl = document.createElement("div");
+    bioEl.className = "connection-bio";
+    bioEl.textContent = user.bio || "Pengguna InstaLite";
+
+    meta.append(nameEl, bioEl);
+    info.append(avatar, meta);
+
+    const followBtn = document.createElement("button");
+    followBtn.className = "btn-follow-pill";
+    followBtn.type = "button";
+    followBtn.dataset.targetUid = user.uid;
+    applyFollowButtonUI(followBtn, user.uid);
+    followBtn.addEventListener("click", () => toggleFollowUser(user.uid, username));
+
+    item.append(info, followBtn);
+    listEl.append(item);
+  });
+}
+
+function switchConnectionsTab(tabName) {
+  activeConnectionsTab = tabName;
+  document.querySelectorAll(".connections-tab-btn").forEach(btn => {
+    const active = btn.dataset.connectionsTab === tabName;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  renderConnectionsList();
+}
+
+function openConnectionsModal(tabName = "mutual") {
+  openModal("connectionsModal");
+  switchConnectionsTab(tabName);
+}
+
+$("profileFollowersBtn")?.addEventListener("click", () => openConnectionsModal("followers"));
+$("profileFollowingBtn")?.addEventListener("click", () => openConnectionsModal("following"));
+$("profileMutualBtn")?.addEventListener("click", () => openConnectionsModal("mutual"));
+$("openDiscoverUsersBtn")?.addEventListener("click", () => openConnectionsModal("discover"));
+
+document.querySelectorAll(".connections-tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    switchConnectionsTab(btn.dataset.connectionsTab || "mutual");
+  });
+});
+
