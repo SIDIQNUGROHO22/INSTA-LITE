@@ -1,13 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="instaPurpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#4f46e5"/>
-      <stop offset="50%" stop-color="#8b5cf6"/>
-      <stop offset="100%" stop-color="#ec4899"/>
+    <linearGradient id="instaLiteGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="16" fill="url(#instaPurpleGrad)"/>
-  <rect x="14" y="14" width="36" height="36" rx="10" fill="none" stroke="#ffffff" stroke-width="3.6"/>
-  <circle cx="32" cy="32" r="8.5" fill="none" stroke="#ffffff" stroke-width="3.6"/>
-  <circle cx="43" cy="21" r="2.4" fill="#ffffff"/>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#instaLiteGrad)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="16" y="16" width="32" height="32" rx="9" ry="9"/>
+    <circle cx="32" cy="32" r="7.5"/>
+    <circle cx="41.5" cy="22.5" r="1.5" fill="#ffffff" stroke="none"/>
+  </g>
 </svg>
