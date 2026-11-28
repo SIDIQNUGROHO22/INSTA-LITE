@@ -1337,7 +1337,7 @@ function createPostCardElement(post, options = {}) {
   const avatarEl = document.createElement("div");
   avatarEl.className = "avatar-mini post-author-avatar post-author-name-clickable";
   avatarEl.dataset.authorUid = post.user_id || "";
-  avatarEl.title = `Lihat profil @${authorUsername}`;
+  avatarEl.title = `Lihat profil ${authorUsername}`;
   avatarEl.addEventListener("click", () => showUserProfilePreview(authorUsername));
 
   const cachedAuthor = (currentUser && post.user_id === currentUser.id)
@@ -1356,7 +1356,7 @@ function createPostCardElement(post, options = {}) {
   const nameTimeBox = document.createElement("div");
   const nameEl = document.createElement("div");
   nameEl.className = "post-author-name post-author-name-clickable";
-  nameEl.title = `Lihat profil @${authorUsername}`;
+  nameEl.title = `Lihat profil ${authorUsername}`;
   nameEl.textContent = authorUsername;
   nameEl.addEventListener("click", () => showUserProfilePreview(authorUsername));
 
@@ -2117,7 +2117,7 @@ async function loadActivePostComments(postId) {
     const authorNameEl = document.createElement("span");
     authorNameEl.className = "comment-author";
     authorNameEl.textContent = cUsername;
-    authorNameEl.title = `Lihat profil @${cUsername}`;
+    authorNameEl.title = `Lihat profil ${cUsername}`;
     authorNameEl.addEventListener("click", () => showUserProfilePreview(cUsername));
 
     const timeEl = document.createElement("span");
@@ -2382,7 +2382,7 @@ async function showUserProfilePreview(username) {
   try {
     const found = await findUserByUsername(cleanUsername);
     if (!found) {
-      showToast(`Pengguna @${cleanUsername} tidak ditemukan.`, "warning");
+      showToast(`Pengguna ${cleanUsername} tidak ditemukan.`, "warning");
       return;
     }
 
@@ -2392,9 +2392,9 @@ async function showUserProfilePreview(username) {
     previewedProfileUsername = userData.username || "";
     previewedProfileUid = userUid;
 
-    $("userPreviewTitle").textContent = `Profil @${userData.username}`;
+    $("userPreviewTitle").textContent = `Profil ${userData.username}`;
     renderAvatarElement($("userPreviewAvatar"), userData.photo_url, initial, userData.username);
-    $("userPreviewUsername").textContent = `@${userData.username}`;
+    $("userPreviewUsername").textContent = userData.username;
     $("userPreviewBio").textContent = userData.bio || "Belum ada bio.";
 
     const [postsCountRes, followersCountRes, followingCountRes] = await Promise.all([
@@ -2880,7 +2880,7 @@ async function toggleFollowUser(targetUid, targetUsername = "Pengguna") {
         .eq("follower_id", currentUser.id)
         .eq("following_id", targetUid);
       if (error) throw error;
-      showToast(`Berhenti mengikuti @${targetUsername}.`, "info");
+      showToast(`Berhenti mengikuti ${targetUsername}.`, "info");
     } else {
       const { error } = await supabase
         .from("follows")
@@ -2890,8 +2890,8 @@ async function toggleFollowUser(targetUid, targetUsername = "Pengguna") {
       const becameMutual = followsMe;
       showToast(
         becameMutual
-          ? `Anda dan @${targetUsername} sekarang mutualan!`
-          : `Anda mulai mengikuti @${targetUsername}.`,
+          ? `Anda dan ${targetUsername} sekarang mutualan!`
+          : `Anda mulai mengikuti ${targetUsername}.`,
         "success"
       );
 
@@ -3032,7 +3032,7 @@ async function renderConnectionsList() {
 
     const info = document.createElement("div");
     info.className = "connection-user-info";
-    info.title = `Lihat profil @${safeText(user.username)}`;
+    info.title = `Lihat profil ${safeText(user.username)}`;
     info.addEventListener("click", () => {
       closeModal("connectionsModal");
       if (user.username) showUserProfilePreview(user.username);
@@ -3048,7 +3048,7 @@ async function renderConnectionsList() {
 
     const nameEl = document.createElement("div");
     nameEl.className = "connection-username";
-    nameEl.textContent = `@${username}`;
+    nameEl.textContent = username;
 
     const bioEl = document.createElement("div");
     bioEl.className = "connection-bio";

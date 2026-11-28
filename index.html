@@ -109,7 +109,10 @@
         <div id="registerUsernameGroup" class="form-group" hidden>
           <label for="regUsername">Username <span class="required">*</span></label>
           <div class="input-wrapper">
-            <span class="input-icon">@</span>
+            <svg class="input-svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+              <circle cx="12" cy="7" r="4"></circle>
+            </svg>
             <input id="regUsername" type="text" placeholder="misal: andi_nugroho" minlength="3" maxlength="30" autocomplete="username">
           </div>
           <p class="field-hint">3–30 karakter (huruf, angka, titik, atau garis bawah).</p>
@@ -725,7 +728,7 @@
       </div>
       <div class="modal-body user-preview-body">
         <div id="userPreviewAvatar" class="avatar-large">U</div>
-        <h3 id="userPreviewUsername" class="user-preview-username">@username</h3>
+        <h3 id="userPreviewUsername" class="user-preview-username">username</h3>
         <span id="userPreviewRelationBadge" class="badge-subtle badge-mutual" hidden>Mutualan</span>
         <div class="user-preview-stats-row">
           <span id="userPreviewPostsCount" class="badge-subtle">0 Postingan</span>
