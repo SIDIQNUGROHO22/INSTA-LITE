@@ -75,6 +75,10 @@
   box-sizing: border-box;
 }
 
+button, input, select, textarea {
+  font-family: inherit;
+}
+
 /* Aksesibilitas: Elemen hidden selalu disembunyikan */
 [hidden] {
   display: none !important;
@@ -335,6 +339,9 @@ body::after {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  position: relative;
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
@@ -895,6 +902,16 @@ input:focus + .input-svg,
   color: var(--text-main);
 }
 
+/* Pastikan span .btn-text di dalam tombol aksi tetap mengikuti warna tombol (putih) */
+.btn-primary .btn-text,
+.btn-primary:hover .btn-text,
+.btn-danger .btn-text,
+.btn-danger:hover .btn-text {
+  color: inherit;
+  font-size: inherit;
+  cursor: inherit;
+}
+
 .btn-text strong {
   color: #2563eb;
   font-weight: 700;
@@ -1057,6 +1074,7 @@ input:focus + .input-svg,
 
 .profile-control-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 20px;
   padding-top: 18px;
@@ -2126,10 +2144,10 @@ input:focus + .input-svg,
 /* Modal Koneksi & Mutualan */
 .connections-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 12px 18px 10px;
   border-bottom: 1px solid rgba(226, 232, 240, 0.75);
-  overflow-x: auto;
 }
 
 .connections-tab-btn {

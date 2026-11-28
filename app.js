@@ -843,7 +843,7 @@ function renderAvatarElement(container, photoURL, initial, username = "Pengguna"
   if (isSafeMediaUrl(photoURL)) {
     const img = document.createElement("img");
     img.src = photoURL.trim();
-    img.alt = safeText(username);
+    img.alt = container.id === "navAvatar" ? "" : safeText(username);
     img.className = "avatar-photo-img";
     img.loading = "lazy";
     container.replaceChildren(img);
