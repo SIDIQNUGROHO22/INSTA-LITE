@@ -26,6 +26,21 @@ Aplikasi web media sosial ringan (Instagram Lite) berbasis **HTML, CSS, Vanilla 
 
 ---
 
+## Akun Uji Coba (Demo)
+
+Akun berikut tersedia untuk mengetes fitur masuk, posting, **+ Ikuti**, **Mutualan**, komentar, dan notifikasi real-time tanpa perlu daftar ulang:
+
+| Username | Email | Kata Sandi |
+| :--- | :--- | :--- |
+| `prabowo` | `sidiqnugroho99o+prabowo@gmail.com` | `InstaLite123!` |
+| `tedi` | `sidiqnugroho99o+tedi@gmail.com` | `InstaLite123!` |
+| `mas_amba` | `sidiqnugroho99o+masamba@gmail.com` | `InstaLite123!` |
+| `mas_gatot` | `sidiqnugroho99o+masgatot@gmail.com` | `InstaLite123!` |
+
+> **Catatan:** Data pengguna baru dan aktivitas login tercatat di database **Supabase** (`Authentication → Users` dan tabel `public.profiles`), bukan ditulis otomatis ke `README.md` karena GitHub Pages bersifat statis dan demi menjaga keamanan repositori serta privasi pengguna.
+
+---
+
 ## Struktur File & Backup
 
 - `index.html` — Antarmuka aplikasi, dashboard profil, form posting, feed, dan modal dialog.
